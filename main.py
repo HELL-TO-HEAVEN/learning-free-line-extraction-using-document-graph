@@ -1,5 +1,6 @@
 import random as rd
 import functools as ft
+import itertools as it
 import operator as op
 import numpy as np
 import cv2
@@ -29,18 +30,23 @@ def overlay_images(image, mask, vertexes_list=None, radius=1):
 
         return res
     else:
+        # switch row col coordinates
+        # this to be used if cv2.circle is used
+        # vertexes_list = [(c, r) for r, c in vertexes_list]
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
         # random_color = (100, 156, 88)
         for point in vertexes_list:
             random_color = (rd.randint(0, 100), rd.randint(100, 200), rd.randint(0, 255))
-            # cv2.circle(image, point, radius, random_color, cv2.CV_FILLED)
+            # cv2.circle(image, point, radius, random_color, cv2.FILLED)
             image[point] = random_color
 
         return image
 
 
 # ----------------------------------
-# returns ????
+# TODO modify so: traverse edge, and find an edge from vertexes v to u with width of 1 pixel
+# TODO this is done via m-connected search which insures no redundant pixels are part of the edge
+
 def m_connected(pixel, mask):
     def is_in_image(co_ordinate, shape):
         r, c = co_ordinate
@@ -61,14 +67,6 @@ def m_connected(pixel, mask):
                                      and is_in(add_offset((o_r, o_c)))]
 
     return [add_offset(offset) for offset in four_connected + uniquely_diagonally_connected]
-
-
-# --------------
-#
-def find_shortest_paths(vertexes_list, mask):
-    # for each u,v in V we find the shortest m-connected path
-    # using m-connected ensures no redundant paths are calculated - speeds up process
-    return 0
 
 
 # ---------------------------------------------------------------------------------
@@ -171,7 +169,7 @@ def get_vertexes(ridges_matrix, junction_pixels_mask):
         co_ordinates = tuple(pixels_list_i[max_index])
         # modify vertexes list and mask accordingly
         vertexes_list.append(co_ordinates)
-        vertexes_dictionary[co_ordinates] = pixels_list_i
+        vertexes_dictionary[co_ordinates] = [tuple(x) for x in pixels_list_i]
         vertexes_mask[co_ordinates] = 1
 
     return vertexes_dictionary, vertexes_list, labels, vertexes_mask
@@ -179,18 +177,59 @@ def get_vertexes(ridges_matrix, junction_pixels_mask):
 
 # ---------------------------------------------------------------------------------
 # edge extraction
-def get_edges(ridge_mask, junction_pixels_mask):
+def get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_list):
+    vertexes_dictionary = set(list(it.chain.from_iterable(vertexes_dictionary.values())))
+
     # we remove the junctions from the ridge mask
     # this way we disconnect them from each other
-    edges_mask = ridge_mask - junction_pixels_mask
+    edges_mask = ridges_mask - junction_pixels_mask
     # each connected component is an edge in the graph
     n_edges, labels = cv2.connectedComponents(edges_mask, connectivity=8)
     # add to a dictionary - edge number, and its list of pixels
     edge_dictionary = {}
+    edges_list = []
     for i in range(1, n_edges):
         # for each label we retrieve its list of pixels
-        edge_dictionary[i] = np.argwhere(labels == i)
+        edge_pixels = np.argwhere(labels == i)
+        edge_pixels = list(map(tuple, edge_pixels))
+        print(len(edge_pixels))
+        edge_dictionary[i] = edge_pixels
 
+        # iteratively - add in junction pixels that are nearby to the current edge
+        # new pixels are added to the edge, then we do the same (increasing edge width/length by 1)
+        # new pixels come only from junction pixels
+        # this way the edge covers the vertexes as well
+        not_empty = True
+        while not_empty:
+            # add-in candidate junctions
+            # 8-neighborhood of a pixel
+            neighborhood = [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, -1), (-1, 1), (1, -1), (0, 0)]
+            # calculate values of the pixels using the offsets for all edge_pixels of edge i
+            pixels_with_neighbors = list(tuple(map(op.add, pixel, offset))
+                                         for pixel in edge_pixels for offset in neighborhood)
+            # junction pixels are added back
+            candidate_edge_pixels = list(set.intersection(set(pixels_with_neighbors), vertexes_dictionary))
+            vertexes_dictionary = filter(lambda edge_pixel: edge_pixel in candidate_edge_pixels, vertexes_dictionary)
+            print(len(candidate_edge_pixels))
+            if len(candidate_edge_pixels) == 0:
+                not_empty = False
+            else:
+                print(edge_pixels)
+                print(candidate_edge_pixels)
+                edge_pixels += candidate_edge_pixels
+        # once this edge is complete
+        # TODO we need to find its vertexes
+        # TODO then apply m-adjacency to find the shortest slimmest version of it
+        one_edge_mask = np.zeros_like(ridges_mask)
+        for x in edge_pixels:
+            one_edge_mask[x] = 255
+        res = overlay_images(ridges_mask*255, one_edge_mask)
+        cv2.imshow('res_' + str(i), res)
+        cv2.waitKey()
+        cv2.destroyAllWindows()
+
+        # in an ideal world, we'd have two vertexes, here we have variable number of vertexes
+        # edges_list.append(candidate_vertexes)
     return edge_dictionary
 
 
@@ -260,7 +299,10 @@ def run_all(path):
     # retrieve vertex pixels
     vertexes_dictionary, vertexes_list, labels, vertex_mask = get_vertexes(ridges_matrix, junction_pixels_mask)
     # retrieve edges between two vertexes
-    edges_dictionary, edges_list = get_edges(ridges_matrix, junction_pixels_mask)
+    # each edge is a series of pixels from vertex u to vertex v
+    edges_dictionary, edges_list = get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_list)
+    for key in edges_dictionary.keys():
+        print(key, edges_dictionary[key])
 
     # display
     overlay_image = overlay_images(ridges_mask * 255, vertex_mask * 255, vertexes_list)
