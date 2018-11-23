@@ -3,7 +3,6 @@ import functools as ft
 import itertools as it
 import operator as op
 import numpy as np
-import time
 import cv2
 
 
@@ -11,6 +10,19 @@ import cv2
 # auxiliary functions
 def uint8_array(rows):
     return np.array(rows).astype(np.uint8)
+
+
+def overlay_edges(image, edge_list):
+    # random_color = (100, 156, 88)
+    random_color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
+    for point in edge_list:
+        # cv2.circle(image, point, radius, random_color, cv2.FILLED)
+        image[point] = random_color
+    # print(len(edge_list))
+    # cv2.imshow("", image)
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
+    return image
 
 
 def overlay_images(image, mask, vertexes_list=None, radius=1):
@@ -105,7 +117,7 @@ def close_junctions(junctions_mask, ridge_mask):
         # for each label we retrieve its list of pixels
         one_junction_pixels = set(map(tuple, np.argwhere(labels == i)))
         # for junctions smaller than 5, we add a radius of 2 to the center pixel to increase the junction size
-        if len(one_junction_pixels) < 5:
+        if len(one_junction_pixels) < 7:
             median = median_pixel(list(one_junction_pixels))
 
             one_junction_points = set(it.product(range(median[0] - 2, median[0] + 2),
@@ -126,6 +138,7 @@ def close_junctions(junctions_mask, ridge_mask):
 
     # cv2.imwrite("after.png", overlay_images(ridge_mask*255, junctions_mask*255))
     return junctions_mask
+
 
 # ---------------------------------------------------------------------------------
 # mark junction pixels using kernels and the ridge matrix
@@ -231,7 +244,9 @@ def get_vertexes(ridges_matrix, junction_pixels_mask):
 
 def save_image_like(image_like, pixel_list, name):
     image = np.zeros_like(image_like)
-    for x in pixel_list:
+    result = list(filter(lambda px: False if px[0] < 0 or px[0] + 1 > image_like.shape[0] or px[1] < 0 or
+                                            px[1] + 1 > image_like.shape[1] else True, pixel_list))
+    for x in result:
         image[x] = 255
     res = overlay_images(image_like * 255, image)
     cv2.imwrite(name + ".png", res)
@@ -250,8 +265,9 @@ def view_image_like(image_like, pixel_list, name):
 # ---------------------------------------------------------------------------------
 # edge extraction
 def get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_list):
-    vertexes_set = set(list(it.chain.from_iterable(vertexes_dictionary.values())))
 
+    all_junction_pixels_set = set(map(tuple, np.argwhere(junction_pixels_mask != 0)))
+    rgb_ridge_mask = cv2.cvtColor(ridges_mask, cv2.COLOR_GRAY2RGB)
     # we remove the junctions from the ridge mask
     # this way we disconnect them from each other
     edges_mask = ridges_mask - junction_pixels_mask
@@ -261,9 +277,10 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_l
     # add to a dictionary - edge number, and its list of pixels
     edge_dictionary = {}
     for i in range(1, n_edges):
+        # reset junction list
+        junction_pixels_set = all_junction_pixels_set
         # for each label we retrieve its list of pixels
         edge_pixels = list(map(tuple, np.argwhere(labels == i)))
-        edge_dictionary[i] = edge_pixels
 
         # iteratively - add in junction pixels that are nearby to the current edge
         # new pixels are added to the edge, then we do the same (increasing edge width/length by 1)
@@ -271,20 +288,23 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_l
         # this way the edge covers the vertexes as well
         not_empty = True
         j = 0
-        save_image_like(ridges_mask, edge_pixels, str(i) + "_edge_mask_" + str(j))
+        # save_image_like(ridges_mask, edge_pixels, str(i) + "_edge_mask_" + str(j))
         while not_empty:
+
             # add-in candidate junctions
             # 8-neighborhood of a pixel
-            neighborhood = [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, -1), (-1, 1), (1, -1), (0, 0)]
+            neighborhood = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0), (0, 1), (1, -1), (1, 0), (1, 1)]
             # calculate values of the pixels using the offsets for all edge_pixels of edge i
-            pixels_with_neighbors = set(tuple(map(op.add, pixel, offset))
-                                        for pixel in edge_pixels for offset in neighborhood)
-            # junction pixels are added back
-            candidate_edge_pixels = list(set.intersection(pixels_with_neighbors, vertexes_set))
-            # print('candidate_edge_pixels=', len(candidate_edge_pixels))
 
+            pixels_with_neighbors = set(tuple(map(lambda o: (o[0][0] + o[1][0], o[0][1] + o[1][1]),
+                                                  it.product(edge_pixels, neighborhood))))
+            # save_image_like(ridges_mask, pixels_with_neighbors, str(i) + '_pixels_with_neighbors')
+            # junction pixels are added back
+            candidate_edge_pixels = list(set.intersection(pixels_with_neighbors, junction_pixels_set))
+            # print('candidate_edge_pixels=', len(candidate_edge_pixels))
             # filter these pixels from junction list
-            vertexes_set = set(filter(lambda edge_pixel: edge_pixel not in candidate_edge_pixels, vertexes_set))
+            junction_pixels_set = set(filter(lambda edge_pixel: edge_pixel not in candidate_edge_pixels,
+                                             junction_pixels_set))
             # save_image_like(ridges_mask, vertexes_set, str(i) + "_vertexes_set_after_" + str(j))
             j += 1
             # view_image_like(ridges_mask, vertexes_set, "vertexes_set_after")
@@ -294,21 +314,22 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_l
                 not_empty = False
             else:
                 edge_pixels += candidate_edge_pixels
-            save_image_like(ridges_mask, edge_pixels, str(i) + "_edge_mask_" + str(j))
+            # save_image_like(ridges_mask, edge_pixels, str(i) + "_edge_mask_" + str(j))
         # once this edge is complete - we find its vertexes
         res = list(set.intersection(set(edge_pixels), set(vertexes_list)))
-        print(res)
-        # TODO then apply m-adjacency to find the shortest slimmest version of it
-        one_edge_mask = np.zeros_like(ridges_mask)
-        for x in edge_pixels:
-            one_edge_mask[x] = 255
-        res = overlay_images(ridges_mask*255, one_edge_mask)
-        cv2.imshow('res_' + str(i), res)
-        cv2.waitKey()
-        cv2.destroyAllWindows()
+        # TODO FOR NOW !!!
+        # if it has 1 vertex - we remove it
+        # if it has two vertexes, it's a good edge
+        # TODO if it has three vertexes - we need to split ! ! ! ! ! !
 
-        # in an ideal world, we'd have two vertexes, here we have variable number of vertexes
-        # edges_list.append(candidate_vertexes)
+        # TODO then apply m-adjacency to find the shortest slimmest version of the edge
+        rgb_ridge_mask = overlay_edges(rgb_ridge_mask, edge_pixels)
+        edge_dictionary[i] = edge_pixels
+
+    cv2.imshow('result', rgb_ridge_mask)
+    cv2.imwrite('graph_edges_result.png', rgb_ridge_mask)
+    cv2.waitKey()
+    cv2.destroyAllWindows()
     return edge_dictionary
 
 
@@ -381,7 +402,7 @@ def run_all(path):
     save_image_like(ridges_mask, vertexes_list, 'vertex_mask')
     # retrieve edges between two vertexes
     # each edge is a series of pixels from vertex u to vertex v
-    edges_dictionary, edges_list = get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_list)
+    edges_dictionary = get_edges(ridges_mask, junction_pixels_mask, vertexes_dictionary, vertexes_list)
     for key in edges_dictionary.keys():
         print(key, edges_dictionary[key])
 
