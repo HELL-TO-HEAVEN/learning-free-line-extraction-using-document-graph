@@ -298,9 +298,7 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
     # cv2.imwrite('0_edges_mask.png', edges_mask*255)
     # add to a dictionary - edge number, and its list of pixels
     edge_dictionary = {}
-    edge_vertex_dictionary = {}
     edge_set = set()
-    one_vertex_edge_dictionary = {}
     # 0 vertexes, 1 vertexes, 2 vertexes, 3 or more
     stats = [0, 0, 0, 0, 0, 0, 0, 0, 0]
     for i in range(1, n_edges):
@@ -314,11 +312,11 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
         # new pixels are added to the edge, then we do the same (increasing edge width/length by 1)
         # new pixels come only from junction pixels
         # this way the edge covers the vertexes as well
-        not_empty = True
+        empty = False
 
         # save_image_like(ridges_mask, edge_pixels, str(i) + "_edge_mask_" + str(j))
-        while not_empty:
-
+        # Note: edges that have one vertex are discarded
+        while not empty:
             # add-in candidate junctions
             # 8-neighborhood of a pixel
             neighborhood = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0), (0, 1), (1, -1), (1, 0), (1, 1)]
@@ -342,7 +340,7 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
             # stopping criteria - once we can't add more pixels to the edge from junction pixels, we stop
             # print(len(candidate_edge_pixels))
             if len(candidate_edge_pixels) == 0:
-                not_empty = False
+                empty = True
             else:
                 edge_pixels += candidate_edge_pixels
             # save_image_like(ridges_mask, edge_pixels, str(i) + "_edge_mask_" + str(j))
@@ -380,25 +378,11 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
             edge_dictionary[tuple(start_end_vertexes)] = m_adjacent_edge_pixels
             edge_set.update(edge_pixels)
             stats[2] += 1
-        else:
-            # TODO for now we store them in their own dictionary
-            # once done, we check for each edge if it has minimal overlap with the 2-vertex edges
-            # if so, we do not add them since they are mostly junction 'edges'
-            # otherwise, they are mostly edges that touch document boundaries or document text
-            one_vertex_edge_dictionary[i] = edge_pixels
-
-    # remove edges with one vertex only
-    # for now we remove only those that intersect with other edges - otherwise added as is
-    # TODO decide what to do with this, use or not?
-    # for key in one_vertex_edge_dictionary.keys():
-    #     one_edge_set = set(one_vertex_edge_dictionary[key])
-    #    if len(one_edge_set) - len(set.intersection(one_edge_set, edge_set)) > 10:
-    #       edge_dictionary[key] = one_vertex_edge_dictionary[key]
-    #        rgb_ridge_mask = overlay_edges(rgb_ridge_mask, one_vertex_edge_dictionary[key], (0, 0, 255))
-    #        stats[1] += 1
-    #    else:  # removed
-    #        stats[0] += 1
-
+    # print(stats)
+    # TODO - move to own function - partial edge combination
+    # for each vertex, if it takes part of two edges exactly, we combine the two edges as one
+    # and add the vertex as a new edge pixel
+    # done iteratively until no more vertexes found that have two edges exactly
     before_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
     for edge_list in edge_dictionary.values():
         before_ridge_mask = overlay_edges(before_ridge_mask, edge_list)
@@ -409,7 +393,6 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
         for element in [item for item in edge_dictionary.keys()]:
             all_vertexes.extend(element)
         counted_edges = col.Counter(all_vertexes)
-
         # we check for each vertex in how many edges it participates in
         # each key has two vertexes of an edge (start, end)
         # for each vertex we count the number of times it is found in the edge list
@@ -442,11 +425,38 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
     after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
     for edge_list in edge_dictionary.values():
         after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
-    cv2.imshow('result_after', after_ridge_mask)
+    cv2.imwrite('result_after_0.png', after_ridge_mask)
+    # remove all vertexes that have one edge only and their edge as well from the graph
+    done = False
+    while not done:
+        all_vertexes = []
+        for element in [item for item in edge_dictionary.keys()]:
+            all_vertexes.extend(element)
+        counted_edges = col.Counter(all_vertexes)
+        if 1 not in counted_edges.values():
+            done = True
+        else:
+            # find the vertex that has one edge
+            # find first vertex with two edges
+            element = tuple()
+            for e in counted_edges:
+                if counted_edges[e] == 1:
+                    element = e
+                    break
+            # we find the relevant u for the edge (u,v)
+            edge_for_element = [item for item in edge_dictionary.keys() if element in item]
+            # we find the group of pixels of the edge, and remove from dictionary
+            item_0 = edge_for_element[0]
+            edge_dictionary.pop(item_0)
+
+    after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    for edge_list in edge_dictionary.values():
+        after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
+    # cv2.imshow('result_after', after_ridge_mask)
     cv2.imwrite('graph_edges_result_after.png', after_ridge_mask)
     cv2.imwrite('left.png', left)
-    cv2.waitKey()
-    cv2.destroyAllWindows()
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
     return edge_dictionary
 
 
@@ -489,13 +499,111 @@ def pre_process(path):
 
 
 # ---------------------------------------------------------------------------------
+# assistance function - calculates angle between three points, in radians
+def calculate_cos_angle(u, v, w):
+    u_x, u_y = u
+    v_x, v_y = v
+    w_x, w_y = w
+
+    x1 = u_x - v_x
+    y1 = u_y - v_y
+    x2 = w_x - v_x
+    y2 = w_y - v_y
+
+    dot = x1 * x2 + y1 * y2
+    norma_1 = np.sqrt(x1 * x1 + y1 * y1)
+    norma_2 = np.sqrt(x2 * x2 + y2 * y2)
+
+    return dot / (norma_1 * norma_2)
+
+
+# ---------------------------------------------------------------------------------
+# assistance function - calculates for edge (u, v) how close its v junction to the shape of T
+def calculate_junction_score(u, v, edges_dictionary_keys):
+    v_x, v_y = v
+    edges_of_v = []
+    # find all edges in graph that have vertex v as part of it
+    candidates = [e for e in edges_dictionary_keys if v in e]
+    # for each candidate, we ensure that at least one edge is not v and not u, otherwise it might be u,v !
+    for e in candidates:
+        first, second = e
+        if first != v and first != u:
+            edges_of_v.append(first)
+        if second != v and second != u:
+            edges_of_v.append(second)
+    # if we have less than two edges for v after filtering, then v does not have two edges
+    # this means that we can't calculate its score, we return a failure message
+    if len(edges_of_v) < 2:
+        return None, None
+    # we need to find thw two closest edges to point u from v
+    # we calculate the distance between vertex u and each vertex e_i of candidate edge (v, e_i)
+    distances_of_v = []
+    for edge_of_v in edges_of_v:
+        e_x, e_y = edge_of_v
+        distances_of_v.append(np.sqrt(np.power((v_x - e_x), 2) + np.power((v_y - e_y), 2)))
+    # retrieve two closest vertexes to vertex v
+    min_idx = np.argmin(distances_of_v)
+    max_idx = np.argmax(distances_of_v)
+    w1 = edges_of_v[min_idx]
+    edges_of_v[min_idx] = edges_of_v[max_idx]
+    min_idx = np.argmin(distances_of_v)
+    w2 = edges_of_v[min_idx]
+    # now we have three edges: (u, v), (v, w1), (v, w2)
+    # calculate the angles between each two edges
+    angle_uv_vw1 = calculate_cos_angle(u, v, w1)
+    angle_uv_vw2 = calculate_cos_angle(u, v, w2)
+    angle_w1v_vw2 = calculate_cos_angle(w1, v, w2)
+    # we find the junction score by finding how far the 2nd cos(degree) is from 0
+    if angle_w1v_vw2 >= angle_uv_vw1 >= angle_uv_vw2:
+        min_junction_score = np.abs(angle_uv_vw1)
+    elif angle_w1v_vw2 >= angle_uv_vw2 >= angle_uv_vw1:
+        min_junction_score = np.abs(angle_uv_vw2)
+    elif angle_uv_vw2 >= angle_w1v_vw2 >= angle_uv_vw1:
+        min_junction_score = np.abs(angle_w1v_vw2)
+    else:
+        return None, None
+    # return the junction edges (u,v) (v,w1) (v,w2) in two tuple format
+    # also returned the junction score. the closer the score to 0 the more its shape looks like T
+    return tuple([(u, v), (w1, w2)]), min_junction_score
+
+
+# ---------------------------------------------------------------------------------
 # classify edges, bridge or link
 def classify_edges(edges_dictionary):
     classifications = dict()
     # TODO first, we get for each vertex, its list of edges
     # TODO second, for each vertex and its list of edges, we calculate the degrees of each 3 edges
     # TODO 3rd, we find the best result out of three -> closest to a T junction
-    # TODO 4th, if 
+    # TODO 4th, if
+    edge_scores = dict()
+    edge_dictionary_keys = edges_dictionary.keys()
+    for edge in edge_dictionary_keys:
+        u, v = edge
+        if u == v:  # TODO this need to be fixed - remove edges that have same u and v.. why are they present?!?!
+            continue
+        junction, score = calculate_junction_score(u, v, edge_dictionary_keys)
+        if junction is not None:
+            edge_scores[junction] = score
+        junction, score = calculate_junction_score(v, u, edge_dictionary_keys)
+        if junction is not None:
+            edge_scores[junction] = score
+
+    # if score of edge (u,v) + score of edge (v,u) < 1 -> bridge, otherwise, link
+    # not all edges have their mirror edge, we classify by < 0.5 then
+    # TODO think about this .....
+    for elem1 in edge_scores.keys():
+        print('elem1=', elem1)
+        elem2 = tuple([tuple(reversed(elem1[0])), elem1[1]])
+        if elem2 in edge_scores.keys():
+            print(elem2, 'score=', edge_scores[elem2])
+        else:
+            print('no elem2!')
+    print(edge_scores)
+    exit()
+    # we have a dictionary of edge_scores, key is edge (u,v), and value is its T shape score
+    # TODO then decide how to classify !  ! ? ? ? ? ?
+    # TODO this needs to be calculated twice for each edge ? ? ? ? ? ?
+    # TODO !!!!!
 
     return classifications
 
