@@ -400,6 +400,39 @@ def merge_two_edge_vertexes(edge_dictionary):
 
 
 # ---------------------------------------------------------------------------------
+# clean graph up by removing 1-edge vertexes, and merging 2-edge vertexes
+def clean_graph(edge_dictionary):
+    # print(stats)
+    time_print('graph cleanup...')
+    # for each vertex, if it takes part of two edges exactly, we combine the two edges as one
+    # and add the vertex as a new edge pixel
+    # done iteratively until no more vertexes found that have two edges exactly
+    # before_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    # for edge_list in edge_dictionary.values():
+    #    before_ridge_mask = overlay_edges(before_ridge_mask, edge_list)
+    # cv2.imwrite('graph_edges_result_before.png', before_ridge_mask)
+    # merges edges of vertexes that have two edges
+
+    # iteratively apply merging and removal operations
+    # once after another, until graph stabilizes
+    changed, edge_dictionary = merge_two_edge_vertexes(edge_dictionary)
+    changed, edge_dictionary = remove_one_edge_vertexes(edge_dictionary)
+    while changed:
+        changed, edge_dictionary = merge_two_edge_vertexes(edge_dictionary)
+        if changed:
+            changed, edge_dictionary = remove_one_edge_vertexes(edge_dictionary)
+    # after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    #for edge_list in edge_dictionary.values():
+    #    after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
+    # cv2.imshow('result_after', after_ridge_mask)
+    # cv2.imwrite('graph_edges_result_after.png', after_ridge_mask)
+    # cv2.imwrite('left.png', left)
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
+    return edge_dictionary
+
+
+# ---------------------------------------------------------------------------------
 # edge extraction
 def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
 
@@ -417,13 +450,16 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
     edge_dictionary = {}
     edge_set = set()
     # 0 vertexes, 1 vertexes, 2 vertexes, 3 or more
-    stats = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # stats = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    # 8-neighborhood offsets for a pixel
+    neighborhood = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0), (0, 1), (1, -1), (1, 0), (1, 1)]
     for i in range(1, n_edges):
         # reset junction list
         junction_pixels_set = all_junction_pixels_set
         # for each label we retrieve its list of pixels
         edge_pixels = list(map(tuple, np.argwhere(labels == i)))
-        start_edge_size = len(edge_pixels)
+        # start_edge_size = len(edge_pixels)
 
         # iteratively - add in junction pixels that are nearby to the current edge
         # new pixels are added to the edge, then we do the same (increasing edge width/length by 1)
@@ -435,8 +471,7 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
         # Note: edges that have one vertex are discarded
         while not empty:
             # add-in candidate junctions
-            # 8-neighborhood of a pixel
-            neighborhood = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0), (0, 1), (1, -1), (1, 0), (1, 1)]
+
             # calculate values of the pixels using the offsets for all edge_pixels of edge i
             pixels_with_neighbors = set(tuple(map(lambda o: (o[0][0] + o[1][0], o[0][1] + o[1][1]),
                                                   it.product(edge_pixels, neighborhood))))
@@ -482,7 +517,7 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
                         m_adjacent_edge_pixels = m_edge_bfs(v1, v2, edge_pixels)
                         # rgb_ridge_mask = overlay_edges(rgb_ridge_mask, m_adjacent_edge_pixels)
                         edge_dictionary[tuple([v1, v2])] = m_adjacent_edge_pixels
-                        stats[2] += 1
+                        # stats[2] += 1
         elif len(start_end_vertexes) == 2:
             # then apply m-adjacency to find the shortest slimmest version of the edge from u to v
             m_adjacent_edge_pixels = m_edge_bfs(start_end_vertexes[0], start_end_vertexes[1], edge_pixels)
@@ -490,35 +525,8 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
             # add to dictionary instead of edge_pixels
             edge_dictionary[tuple(start_end_vertexes)] = m_adjacent_edge_pixels
             edge_set.update(edge_pixels)
-            stats[2] += 1
-    # print(stats)
-    time_print('graph cleanup...')
-    # for each vertex, if it takes part of two edges exactly, we combine the two edges as one
-    # and add the vertex as a new edge pixel
-    # done iteratively until no more vertexes found that have two edges exactly
-    before_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
-    for edge_list in edge_dictionary.values():
-        before_ridge_mask = overlay_edges(before_ridge_mask, edge_list)
-    # cv2.imwrite('graph_edges_result_before.png', before_ridge_mask)
-    # merges edges of vertexes that have two edges
+            # stats[2] += 1
 
-    # iteratively apply merging and removal operations
-    # once after another, until graph stabilizes
-    changed, edge_dictionary = merge_two_edge_vertexes(edge_dictionary)
-    changed, edge_dictionary = remove_one_edge_vertexes(edge_dictionary)
-    while changed:
-        changed, edge_dictionary = merge_two_edge_vertexes(edge_dictionary)
-        if changed:
-            changed, edge_dictionary = remove_one_edge_vertexes(edge_dictionary)
-
-    after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
-    for edge_list in edge_dictionary.values():
-        after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
-    # cv2.imshow('result_after', after_ridge_mask)
-    # cv2.imwrite('graph_edges_result_after.png', after_ridge_mask)
-    # cv2.imwrite('left.png', left)
-    # cv2.waitKey()
-    # cv2.destroyAllWindows()
     return edge_dictionary
 
 
@@ -669,7 +677,7 @@ def classify_edges(edges_dictionary, ridges_mask):
     edges_dictionary_keys = edges_dictionary.keys()
     for edge in edges_dictionary_keys:
         u, v = edge
-        if u == v:  # TODO this need to be fixed - remove edges that have same u and v.
+        if u == v:
             continue
         junction_score = calculate_junction_score(u, v, edges_dictionary, ridges_mask)
         if junction_score is not None:
@@ -750,6 +758,8 @@ def execute(input_path):
         # each edge key is a pair of vertexes (u, v)
         time_print('retrieve edges between two vertexes...')
         edge_dictionary = get_edges(ridges_mask, junction_pixels_mask, vertexes_list)
+        time_print('clean graph up...')
+        edge_dictionary = clean_graph(edge_dictionary)
         # using each two vertexes of an edge, we classify whether an edge is a brige (between two lines),
         # or a link (part of a line). As a result, we receive a list of edges and their classification
         time_print('classify edges...')
