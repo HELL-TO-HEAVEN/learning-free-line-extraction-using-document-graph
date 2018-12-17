@@ -622,6 +622,9 @@ def calculate_junction_score(u, v, edges_dictionary, ridges_mask):
     # we calculate the distance between vertex u and each vertex e_i of candidate edge (v, e_i)
     distances_of_v = []
     for edge_of_v in edges_of_v:
+        # find a pixel of distance of R along the edge of (v, e)
+        # this way the angle calculations are more accurate
+        # solves the issue with non-straight edges that skew the final angle calculation
         e_x, e_y = edge_of_v
         distances_of_v.append(np.sqrt(np.power((v_x - e_x), 2) + np.power((v_y - e_y), 2)))
 
@@ -649,21 +652,49 @@ def calculate_junction_score(u, v, edges_dictionary, ridges_mask):
         junction_pixels[tuple([v, w2])] = edges_pixel_list[tuple([v, w2])]
     else:
         junction_pixels[tuple([v, w2])] = edges_pixel_list[tuple([w2, v])]
+
+    # we calculate the angles at pixels of a up to max distance from v
+    # otherwise, due to edges not being straight, we might get wrong angles
+    max_dist = 5
+    max_dist_v = [x for x in range(-max_dist, max_dist + 1)]
+    max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
+    max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
+
+    left_column = list(map(lambda e: (v_x - max_dist, e), max_dist_candidates_y))
+    right_column = list(map(lambda e: (v_x + max_dist, e), max_dist_candidates_y))
+    top_column = list(map(lambda e: (e, v_y - max_dist), max_dist_candidates_x))
+    bottom_column = list(map(lambda e: (e, v_y + max_dist), max_dist_candidates_x))
+
+    w1_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
+                    i in junction_pixels[tuple([v, w1])]]
+    if len(w1_in_radius) == 0:
+        w1_in_radius = [w1]
+    w2_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
+                    i in junction_pixels[tuple([v, w2])]]
+    if len(w2_in_radius) == 0:
+        w2_in_radius = [w2]
+    u_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
+                   i in junction_pixels[tuple([u, v])]]
+    if len(u_in_radius) == 0:
+        u_in_radius = [u]
+    print(w1_in_radius)
+    print(w2_in_radius)
+    print(u_in_radius)
     # now we have three edges: (u, v), (v, w1), (v, w2)
     # calculate the angles between each two edges
-    uv_vw1 = calculate_abs_angle(u, v, w1)
-    uv_vw2 = calculate_abs_angle(u, v, w2)
-    w1v_vw2 = calculate_abs_angle(w1, v, w2)
+    uv_vw1 = calculate_abs_angle(u_in_radius[0], v, w1_in_radius[0])
+    uv_vw2 = calculate_abs_angle(u_in_radius[0], v, w2_in_radius[0])
+    w1v_vw2 = calculate_abs_angle(w1_in_radius[0], v, w2_in_radius[0])
     # we find the junction score by finding how far the 2nd cos(degree) is from 0
     scores = []
-    bridge_threshold = np.pi / 5.0
+    bridge_threshold = np.pi / 4
     # checks whether an edge is a bridge or a link
     # if its a T junction then the angle between v,w1 and v,w2 is the largest out of three
     # in addition if the two angles between u,v and v,w1 and u,v and v,w2 equals PI then
-    # it's a T junction and our edge is a bridge, thus using pi + pi/4 as upper bound and
-    # pi - pi/4 as lower bound for junction classification
+    # it's a T junction and our edge is a bridge, thus using pi + bridge_threshold as upper bound and
+    # pi - bridge_threshold as lower bound for junction classification
     if w1v_vw2 >= uv_vw1 and w1v_vw2 >= uv_vw2 \
-            and np.pi + bridge_threshold >= uv_vw1 + uv_vw2 >= np.pi - bridge_threshold:
+            and np.pi + bridge_threshold > uv_vw1 + uv_vw2 > np.pi - bridge_threshold:
         scores.append(((u, v), EdgeType.BRIDGE, uv_vw1 + uv_vw2))
     else:
         scores.append(((u, v), EdgeType.LINK, max(uv_vw1, uv_vw2)))
@@ -687,8 +718,6 @@ def classify_edges(edges_dictionary, ridges_mask):
             edge_scores.extend(junction_score)
 
     final_scores = dict()
-    # TODO remove collection of edges filtered from edge_scores
-    # TODO improves performance, maybe fixes some issues..
     done = False
     while not done:
         edge = edge_scores[0]
@@ -706,7 +735,7 @@ def classify_edges(edges_dictionary, ridges_mask):
             lambda x: x[2], filter(
                 lambda x: x[1] == EdgeType.BRIDGE, one_edge_scores)))
         if len(bridge_scores) == 0:
-            bridge_score = 0
+            bridge_score = -1
         else:
             bridge_score = ft.reduce(op.add, bridge_scores) / len(bridge_scores)
         # filter out link type scores of the edge
@@ -714,13 +743,14 @@ def classify_edges(edges_dictionary, ridges_mask):
             lambda x: x[2], filter(
                 lambda x: x[1] == EdgeType.LINK, one_edge_scores)))
         if len(link_scores) == 0:
-            link_score = 0
+            link_score = -1
         else:
             link_score = ft.reduce(op.add, link_scores) / len(link_scores)
         # an edge can be classified differently for each of its two vertexes
         # we check each classification value, if the value closer to PI
         # in one of the two classifications - we choose that.
-        if np.abs(np.pi - bridge_score) <= np.abs(np.pi - link_score):
+        # if np.abs(np.pi - bridge_score) <= np.abs(np.pi - link_score):
+        if bridge_score != -1:
             # print('BRIDGE=', bridge_score, ' LINK=', link_score, ' TYPE=', EdgeType.BRIDGE)
             final_scores[edge[0]] = EdgeType.BRIDGE
         else:
@@ -764,8 +794,10 @@ def execute(input_path):
         # or a link (part of a line). As a result, we receive a list of edges and their classification
         time_print('classify edges...')
         edge_scores = classify_edges(edge_dictionary, ridges_mask)
+        # TODO if edge is marked as both link and bridge, which to choose?
         classified_image = overlay_classified_edges(image_preprocessed, edge_dictionary, edge_scores)
         time_print('combine link edges...')
+        # TODO combine link edges
         # cv2.imshow('overlay_classified_edges', classified_image)
         cv2.imwrite(input_path + file_name + '_result.png', classified_image)
         # save the graph in a file
