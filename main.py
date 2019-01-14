@@ -1,3 +1,4 @@
+import sys
 import random as rd
 import functools as ft
 import itertools as it
@@ -37,12 +38,8 @@ def overlay_classified_edges(image, edge_dictionary, edge_scores):
         u, v = edge
         # color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
         if tuple([u, v]) in edge_scores.keys():
-            if edge_scores[tuple([u, v])] == EdgeType.LINK:
-                color = (255, 0, 0)
-            else:
-                color = (0, 255, 0)
-        elif tuple([v, u]) in edge_scores.keys():
-            if edge_scores[tuple([v, u])] == EdgeType.LINK:
+            edge_type, score = edge_scores[tuple([u, v])]
+            if edge_type == EdgeType.BRIDGE:
                 color = (255, 0, 0)
             else:
                 color = (0, 255, 0)
@@ -58,6 +55,7 @@ def overlay_classified_edges(image, edge_dictionary, edge_scores):
 
 def overlay_edges(image, edge_list, color=None):
     image_copy = copy.deepcopy(image)
+
     # random_color = (100, 156, 88)
     if color is None:
         random_color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
@@ -572,6 +570,7 @@ def pre_process(path):
 # calculates angle between three points, result in radians
 # using Decimal for increased precision
 def calculate_abs_angle(u, v, w):
+    # angle between u, v and v, w
     getcontext().prec = 28
 
     u_x, u_y = u
@@ -586,15 +585,75 @@ def calculate_abs_angle(u, v, w):
     dot = Decimal(x1 * x2 + y1 * y2)
     norma_1 = Decimal(x1 * x1 + y1 * y1).sqrt()
     norma_2 = Decimal(x2 * x2 + y2 * y2).sqrt()
-
+    if norma_1 == 0.0:
+        print('norma_1==0->', u, v, w)
+        norma_1 = sys.float_info.epsilon
+    if norma_2 == 0.0:
+        print('norma_2==0->', u, v, w)
+        norma_2 = sys.float_info.epsilon
     val = dot / (norma_1 * norma_2)
 
     return np.abs(np.arccos(float(val)))
 
 
 # ---------------------------------------------------------------------------------
+# assistance function - receives u,v v,w1 v,w2 - three edges
+# calculates the distance from shape T for these three edges
+# where u,v is the I in T
+def calculate_junction_t_distance(u, v, w1, w2, edges_dictionary):
+    v_x, v_y = v
+    max_dist = 9
+    max_dist_v = [x for x in range(-max_dist, max_dist + 1)]
+    max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
+    max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
+
+    left_column = list(map(lambda e: (v_x - max_dist, e), max_dist_candidates_y))
+    right_column = list(map(lambda e: (v_x + max_dist, e), max_dist_candidates_y))
+    top_column = list(map(lambda e: (e, v_y - max_dist), max_dist_candidates_x))
+    bottom_column = list(map(lambda e: (e, v_y + max_dist), max_dist_candidates_x))
+
+    junction_pixels = dict()
+    if tuple([u, v]) in edges_dictionary.keys():
+        junction_pixels[tuple([u, v])] = edges_dictionary[tuple([u, v])]
+    else:
+        junction_pixels[tuple([u, v])] = edges_dictionary[tuple([v, u])]
+
+    if tuple([v, w1]) in edges_dictionary.keys():
+        junction_pixels[tuple([v, w1])] = edges_dictionary[tuple([v, w1])]
+    else:
+        junction_pixels[tuple([v, w1])] = edges_dictionary[tuple([w1, v])]
+
+    if tuple([v, w2]) in edges_dictionary.keys():
+        junction_pixels[tuple([v, w2])] = edges_dictionary[tuple([v, w2])]
+    else:
+        junction_pixels[tuple([v, w2])] = edges_dictionary[tuple([w2, v])]
+
+    w1_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
+                    i in junction_pixels[tuple([v, w1])]]
+    if len(w1_in_radius) == 0:
+        w1_in_radius = [w1]
+    w2_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
+                    i in junction_pixels[tuple([v, w2])]]
+    if len(w2_in_radius) == 0:
+        w2_in_radius = [w2]
+    u_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
+                   i in junction_pixels[tuple([u, v])]]
+    if len(u_in_radius) == 0:
+        u_in_radius = [u]
+
+    # now we have three edges: (u, v), (v, w1), (v, w2)
+    # calculate the angles between each two edges
+    uv_vw1 = calculate_abs_angle(u_in_radius[0], v, w1_in_radius[0])
+    uv_vw2 = calculate_abs_angle(u_in_radius[0], v, w2_in_radius[0])
+    w1v_vw2 = calculate_abs_angle(w1_in_radius[0], v, w2_in_radius[0])
+
+    # distance from t-shape
+    return np.abs(np.pi - w1v_vw2) + np.abs(np.pi / 2.0 - uv_vw1) + np.abs(np.pi / 2.0 - uv_vw2)
+
+
+# ---------------------------------------------------------------------------------
 # assistance function - calculates for edge (u, v) how close its v junction to the shape of T
-def calculate_junction_score(u, v, edges_dictionary, ridges_mask):
+def calculate_junction_score(u, v, edges_dictionary, ridges_mask, window):
     v_x, v_y = v
     edges_of_v = []
     # find all edges in graph that have vertex v as part of it
@@ -655,7 +714,8 @@ def calculate_junction_score(u, v, edges_dictionary, ridges_mask):
 
     # we calculate the angles at pixels of a up to max distance from v
     # otherwise, due to edges not being straight, we might get wrong angles
-    max_dist = 5
+    # TODO PARAMETER_TO_CALCULATE
+    max_dist = 9
     max_dist_v = [x for x in range(-max_dist, max_dist + 1)]
     max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
     max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
@@ -664,6 +724,12 @@ def calculate_junction_score(u, v, edges_dictionary, ridges_mask):
     right_column = list(map(lambda e: (v_x + max_dist, e), max_dist_candidates_y))
     top_column = list(map(lambda e: (e, v_y - max_dist), max_dist_candidates_x))
     bottom_column = list(map(lambda e: (e, v_y + max_dist), max_dist_candidates_x))
+
+    # res = overlay_edges(cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB),
+    #                     left_column, (255, 255, 255))
+    # res = overlay_edges(res, right_column, (255, 255, 255))
+    # res = overlay_edges(res, top_column, (255, 255, 255))
+    # res = overlay_edges(res, bottom_column, (255, 255, 255))
 
     w1_in_radius = [i for i in left_column + right_column + top_column + bottom_column if
                     i in junction_pixels[tuple([v, w1])]]
@@ -677,87 +743,244 @@ def calculate_junction_score(u, v, edges_dictionary, ridges_mask):
                    i in junction_pixels[tuple([u, v])]]
     if len(u_in_radius) == 0:
         u_in_radius = [u]
-    print(w1_in_radius)
-    print(w2_in_radius)
-    print(u_in_radius)
     # now we have three edges: (u, v), (v, w1), (v, w2)
     # calculate the angles between each two edges
     uv_vw1 = calculate_abs_angle(u_in_radius[0], v, w1_in_radius[0])
     uv_vw2 = calculate_abs_angle(u_in_radius[0], v, w2_in_radius[0])
     w1v_vw2 = calculate_abs_angle(w1_in_radius[0], v, w2_in_radius[0])
-    # we find the junction score by finding how far the 2nd cos(degree) is from 0
-    scores = []
-    bridge_threshold = np.pi / 4
-    # checks whether an edge is a bridge or a link
-    # if its a T junction then the angle between v,w1 and v,w2 is the largest out of three
-    # in addition if the two angles between u,v and v,w1 and u,v and v,w2 equals PI then
-    # it's a T junction and our edge is a bridge, thus using pi + bridge_threshold as upper bound and
-    # pi - bridge_threshold as lower bound for junction classification
-    if w1v_vw2 >= uv_vw1 and w1v_vw2 >= uv_vw2 \
-            and np.pi + bridge_threshold > uv_vw1 + uv_vw2 > np.pi - bridge_threshold:
-        scores.append(((u, v), EdgeType.BRIDGE, uv_vw1 + uv_vw2))
-    else:
-        scores.append(((u, v), EdgeType.LINK, max(uv_vw1, uv_vw2)))
+    # res = overlay_edges(res, junction_pixels[tuple([u, v])], (0, 0, 255))
+    # res = overlay_edges(res, junction_pixels[tuple([v, w1])], (0, 255, 0))
+    # res = overlay_edges(res, junction_pixels[tuple([v, w2])], (255, 0, 0))
+    # cv2.imshow(window, res)
+    # cv2.waitKey()
+    # distance_from_shape_t = np.abs(np.pi - w1v_vw2) + np.abs(np.pi / 2.0 - uv_vw1) + np.abs(np.pi / 2.0 - uv_vw2)
+    # print('u=', u, 'v=', v, 'w1=', w1, 'w2=', w2)
+    # print('u_in=', u_in_radius[0], 'v=', v, 'w1_in=', w1_in_radius[0], 'w2_in=', w2_in_radius[0])
+    # print('uv_vw1=', uv_vw1, 'uv_vw2=', uv_vw2, 'w1v_vw2=', w1v_vw2)
+    # each edge will have two distances [0, 1] from our optimal shape:
+    # if u,v is the I part of the T shape -> we have an optimal $bridge$ edge
+    # if u,v is the ‾ of ‾‾  of the T (‾|‾ shape) -> we have an optimal $link$ edge
+    scores = list()
+    scores.append(((u, v), EdgeType.BRIDGE, np.abs(np.pi - w1v_vw2)))
+
+    scores.append(((u, v), EdgeType.LINK,
+                   min(np.abs(np.pi / 2.0 - uv_vw1), np.abs(np.pi / 2.0 - uv_vw2))))
+
+    # print(scores)
+    # res = overlay_edges(cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB),
+    #                     junction_pixels[tuple([u, v])], (255, 255, 255))
+    # res = overlay_edges(res, junction_pixels[tuple([u, v])], (255, 255, 255))
+    # res = overlay_edges(res, junction_pixels[tuple([v, w1])], (0, 255, 0))
+    # res = overlay_edges(res, junction_pixels[tuple([v, w2])], (0, 0, 255))
+    # cv2.imshow(window, res)
+    # cv2.waitKey()
     return scores
 
 
 # ---------------------------------------------------------------------------------
+# for each vertex, we choose every three edges leaving that vertex and calculate
+# their T-distance. The three edges generate a shape, the closer the shape to T
+# the smaller the T-distance is.
+def calculate_junction_t_distances(vertex_dictionary, edges_dictionary, ridges_mask):
+
+    t_shape_distances = dict()
+    for v in vertex_dictionary:
+
+        v_edges = list(filter(lambda uw: uw[0] == v or uw[1] == v, edges_dictionary.keys()))
+        if len(v_edges) < 3:
+            continue
+        vertexes = list(map(lambda uw: uw[0] if uw[1] == v else uw[1], v_edges))
+        # print('v=', v)
+        for combination in it.combinations(vertexes, 3):
+            u, w1, w2 = combination
+            # print('combination=', combination)
+            # the t-shape calculation is done as follows:
+            # (u = B, w1 = L, w2 = L)
+            # this is done for three variants for each three edges
+            # each edge can be Bridge, then the other two are Links
+            t_shape_distances[(u, v, w1, w2)] = calculate_junction_t_distance(u, v, w1, w2, edges_dictionary)
+            t_shape_distances[(w1, v, u, w2)] = calculate_junction_t_distance(w1, v, u, w2, edges_dictionary)
+            t_shape_distances[(w2, v, w1, u)] = calculate_junction_t_distance(w2, v, w1, u, edges_dictionary)
+
+    return t_shape_distances
+
+
+# ---------------------------------------------------------------------------------
 # classify edges, bridge or link
+# TODO OLD WAY - TO BE REMOVED
 def classify_edges(edges_dictionary, ridges_mask):
-    edge_scores = []
+    window = cv2.namedWindow("point")
+    edge_scores = dict()
     edges_dictionary_keys = edges_dictionary.keys()
     for edge in edges_dictionary_keys:
         u, v = edge
         if u == v:
             continue
-        junction_score = calculate_junction_score(u, v, edges_dictionary, ridges_mask)
-        if junction_score is not None:
-            edge_scores.extend(junction_score)
-            junction_score = calculate_junction_score(v, u, edges_dictionary, ridges_mask)
-        if junction_score is not None:
-            edge_scores.extend(junction_score)
+        junction_score_1 = calculate_junction_score(u, v, edges_dictionary, ridges_mask, window)
+        junction_score_2 = calculate_junction_score(v, u, edges_dictionary, ridges_mask, window)
+        if junction_score_1 is not None and junction_score_2 is not None:
+            edge_scores[(u, v)] = (junction_score_1, junction_score_2)
 
     final_scores = dict()
-    done = False
-    while not done:
-        edge = edge_scores[0]
-        # print('edge_scores=', edge_scores)
-        # print('edge=', edge)
-        # retrieve all entries with of the edge (u,v) from the scores list
-        one_edge_scores = tuple(filter(
-            lambda x: edge[0] == x[0] or tuple(reversed(edge[0])) == x[0], edge_scores))
-        edge_scores = list(filter(lambda e: e not in one_edge_scores, edge_scores))
+    for edge in edge_scores.keys():
+        junction_score_1, junction_score_2 = edge_scores[edge]
 
-        if len(edge_scores) == 0:
-            done = True
-        # filter out bridge type scores of the edge
-        bridge_scores = tuple(map(
-            lambda x: x[2], filter(
-                lambda x: x[1] == EdgeType.BRIDGE, one_edge_scores)))
-        if len(bridge_scores) == 0:
-            bridge_score = -1
+        bridge_1, link_1 = junction_score_1
+        bridge_2, link_2 = junction_score_2
+
+        _, _, bridge_score_1 = bridge_1
+        _, _, bridge_score_2 = bridge_2
+        _, _, link_score_1 = link_1
+        _, _, link_score_2 = link_2
+
+        bridge_score = bridge_score_1 + bridge_score_2
+        link_score = link_score_1 + link_score_2
+
+        # each edge might have up to two scores: bridge score, link score
+        if link_score < bridge_score - np.pi / 6:
+            final_scores[edge] = (EdgeType.LINK, link_score)
         else:
-            bridge_score = ft.reduce(op.add, bridge_scores) / len(bridge_scores)
-        # filter out link type scores of the edge
-        link_scores = tuple(map(
-            lambda x: x[2], filter(
-                lambda x: x[1] == EdgeType.LINK, one_edge_scores)))
-        if len(link_scores) == 0:
-            link_score = -1
-        else:
-            link_score = ft.reduce(op.add, link_scores) / len(link_scores)
-        # an edge can be classified differently for each of its two vertexes
-        # we check each classification value, if the value closer to PI
-        # in one of the two classifications - we choose that.
-        # if np.abs(np.pi - bridge_score) <= np.abs(np.pi - link_score):
-        if bridge_score != -1:
-            # print('BRIDGE=', bridge_score, ' LINK=', link_score, ' TYPE=', EdgeType.BRIDGE)
-            final_scores[edge[0]] = EdgeType.BRIDGE
-        else:
-            # print('BRIDGE=', bridge_score, ' LINK=', link_score, ' TYPE=', EdgeType.LINK)
-            final_scores[edge[0]] = EdgeType.LINK
+            final_scores[edge] = (EdgeType.BRIDGE, bridge_score)
 
     return final_scores
+
+
+# ---------------------------------------------------------------------------------
+# calculate_angles
+def calculate_angles(u, edge, edge_pixels, edge_neighbors, edge_neighbors_pixels, ridges_mask, vertexes_along_edges):
+    def calc_angle(in_v, in_u, in_edge_pixels, neighbor, vertexes_along_edges):
+
+        neighbor_edge, neighbor_pixels = neighbor
+        w1, w2 = neighbor_edge
+        in_w = w1 if in_v == w2 else w2
+
+        v_x, v_y = in_v
+        max_dist = 9
+        max_dist_v = [x for x in range(-max_dist, max_dist + 1)]
+        max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
+        max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
+
+        left_column = list(map(lambda e: (v_x - max_dist, e), max_dist_candidates_y))
+        right_column = list(map(lambda e: (v_x + max_dist, e), max_dist_candidates_y))
+        top_column = list(map(lambda e: (e, v_y - max_dist), max_dist_candidates_x))
+        bottom_column = list(map(lambda e: (e, v_y + max_dist), max_dist_candidates_x))
+
+        in_w_in_radius = [i for i in left_column + right_column + top_column + bottom_column if i in neighbor_pixels]
+        if len(in_w_in_radius) == 0:
+            in_w_in_radius = [in_w]
+
+        in_u_in_radius = [i for i in left_column + right_column + top_column + bottom_column if i in in_edge_pixels]
+        if len(in_u_in_radius) == 0:
+            in_u_in_radius = [in_u]
+
+        # before_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+        # before_ridge_mask = overlay_edges(before_ridge_mask, neighbor_pixels, (0, 0, 255))
+        # before_ridge_mask = overlay_edges(before_ridge_mask, in_edge_pixels, (255, 0, 0))
+        # before_ridge_mask = overlay_edges(before_ridge_mask, left_column, (255, 255, 255))
+        # before_ridge_mask = overlay_edges(before_ridge_mask, right_column, (255, 255, 255))
+        # before_ridge_mask = overlay_edges(before_ridge_mask, top_column, (255, 255, 255))
+        # before_ridge_mask = overlay_edges(before_ridge_mask, bottom_column, (255, 255, 255))
+
+        # cv2.namedWindow('after')
+        # cv2.imshow('after', before_ridge_mask)
+        # cv2.waitKey()
+        # cv2.destroyAllWindows()
+        # print('in_u_in_radius=', in_u_in_radius[0], 'in_v=', in_v, 'in_w_in_radius=', in_w_in_radius[0])
+        local_angle = calculate_abs_angle(in_u_in_radius[0], in_v, in_w_in_radius[0])
+        # global_angle = calculate_abs_angle(in_u, in_v, in_w)
+        # print('in_v=', in_v)
+        vertexes = [e for e in vertexes_along_edges[(in_v, in_u)] if e != in_v]
+        angles = [calculate_abs_angle(elem_u, in_v, in_w) for elem_u in vertexes]
+        max_global_angle = np.max(angles)
+        return max(local_angle, max_global_angle)
+
+    v1, v2 = edge
+    v = v1 if u == v2 else v2
+
+    return [calc_angle(u, v, edge_pixels, neighbor, vertexes_along_edges) for neighbor in
+            zip(edge_neighbors, edge_neighbors_pixels)]
+
+
+# ---------------------------------------------------------------------------------
+# get_candidate
+def get_candidate(u, v, edge, edge_pixels, edge_dictionary, ridges_mask, vertexes_along_edges):
+    edge_neighbors = [edge for edge in edge_dictionary.keys() if u in edge and v not in edge]
+    edge_neighbors_pixels = [edge_dictionary[edge] for edge in edge_neighbors]
+    # print('u=', u, 'v=', v, 'edge=', edge)
+    if edge_neighbors:
+        edge_angles = calculate_angles(u, edge, edge_pixels, edge_neighbors, edge_neighbors_pixels, ridges_mask,
+                                       vertexes_along_edges)
+        max_angle_idx = np.argmax(edge_angles)
+        max_angle = edge_angles[max_angle_idx]
+        max_angle_neighbor = edge_neighbors[max_angle_idx]
+        return max_angle_neighbor, max_angle
+    else:
+        return None, None
+
+
+# ---------------------------------------------------------------------------------
+# combine edges
+def combine_edges(vertexes_list, edge_dictionary, ridges_mask):
+    vertexes_along_edges = dict()
+    before_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    for edge_list in edge_dictionary.values():
+        before_ridge_mask = overlay_edges(before_ridge_mask, edge_list)
+    # for each edge (u,v ) we find its neighbour edges (u, w) v!=w
+    # we find angle between two.
+    # then find min angle, then if min angle =< 30degrees we combine together as new edge
+    # this is done iteratively over and over until no more edges can be combined
+    # we do this in greedy manner ! ! ! ! ! ! ! ! ! ! ! !
+    done = False
+    while not done:
+        candidates = []
+        angles = []
+        edge_dictionary_iter = copy.deepcopy(edge_dictionary)
+        while edge_dictionary_iter:
+            edge, edge_pixels = edge_dictionary_iter.popitem()
+            u, v = edge
+            if edge not in vertexes_along_edges.keys():
+                vertexes_along_edges[edge] = edge
+            # print('vertexes_along_edges=', vertexes_along_edges)
+            max_angle_neighbor, max_angle = get_candidate(u, v, edge, edge_pixels, edge_dictionary_iter, ridges_mask,
+                                                          vertexes_along_edges)
+            if max_angle_neighbor is not None:
+                candidates.append((max_angle_neighbor, edge))
+                angles.append(max_angle)
+
+        max_angle_index = np.argmax(angles)
+        edge_one, edge_two = candidates[max_angle_index]
+        threshold = np.pi - np.pi / 3.5
+        # print('angles[min_angle_index]=', angles[max_angle_index])
+        if angles[max_angle_index] > threshold:
+            # we combine those two: edge (u,v) and min_angle_edge (v, w)
+            # then remove edge, and min_angle_neighbor from graph
+            # which means we need to remove all edges where v is part of them ! ! !
+            part_one = edge_dictionary.pop(edge_one)
+            part_two = edge_dictionary.pop(edge_two)
+
+            vertexes_of_edge_one = vertexes_along_edges.pop(edge_one) if edge_one in vertexes_along_edges.keys() \
+                else edge_one
+            vertexes_of_edge_two = vertexes_along_edges.pop(edge_two) if edge_two in vertexes_along_edges.keys() \
+                else edge_two
+
+            new_edge = tuple(set(edge_one + edge_two).difference(set(edge_one).intersection(edge_two)))
+            vertexes_along_edges[new_edge] = tuple(set(vertexes_of_edge_one + vertexes_of_edge_two))
+            # print('edge_one=', edge_one, 'edge_two=', edge_two, 'new_edge=', new_edge)
+            new_edge_pixels = list(set(part_one + part_two))
+            edge_dictionary[new_edge] = new_edge_pixels
+        else:
+            done = True
+
+    # after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    # for edge_list in edge_dictionary.values():
+    #    after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
+    # cv2.namedWindow('before')
+    # cv2.namedWindow('after')
+    # cv2.imshow('before', before_ridge_mask)
+    # cv2.imshow('after', after_ridge_mask)
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
+    return edge_dictionary
 
 
 # ---------------------------------------------------------------------------------
@@ -792,20 +1015,35 @@ def execute(input_path):
         edge_dictionary = clean_graph(edge_dictionary)
         # using each two vertexes of an edge, we classify whether an edge is a brige (between two lines),
         # or a link (part of a line). As a result, we receive a list of edges and their classification
-        time_print('classify edges...')
-        edge_scores = classify_edges(edge_dictionary, ridges_mask)
-        # TODO if edge is marked as both link and bridge, which to choose?
-        classified_image = overlay_classified_edges(image_preprocessed, edge_dictionary, edge_scores)
-        time_print('combine link edges...')
-        # TODO combine link edges
+        # time_print('classify edges...')
+        # edge_scores = classify_edges(edge_dictionary, ridges_mask)
+        # TODO current work . . .
+        # time_print('calculate vertex T-scores...')
+        # calculate_junction_t_distances(vertexes_list, edge_dictionary, ridges_mask)
+        combined_edge_dictionary = combine_edges(vertexes_list, edge_dictionary, ridges_mask)
+        after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+        for edge_list in combined_edge_dictionary.values():
+            after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
+        cv2.imwrite(file_name + '_result.png', after_ridge_mask)
+        # cv2.namedWindow('before')
+        # cv2.namedWindow('after')
+        # cv2.imshow('before', before_ridge_mask)
+        # cv2.imshow('after', after_ridge_mask)
+        # cv2.waitKey()
+        # cv2.destroyAllWindows()
+
+
+        # classified_image = overlay_classified_edges(image_preprocessed, edge_dictionary, edge_scores)
+        # time_print('combine link edges...')
+
         # cv2.imshow('overlay_classified_edges', classified_image)
-        cv2.imwrite(input_path + file_name + '_result.png', classified_image)
+        # cv2.imwrite(input_path + '/results/' + file_name + '_result.png', classified_image)
         # save the graph in a file
-        with open(input_path + file_name + '_graph.pkl', 'wb') as handle:
+        with open(input_path + '/results/' + file_name + '_graph.pkl', 'wb') as handle:
             pickle.dump(edge_dictionary, handle, protocol=pickle.HIGHEST_PROTOCOL)
         # save classifications of each edge in a file
-        with open(input_path + file_name + '_scores.pkl', 'wb') as handle:
-            pickle.dump(edge_scores, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        # with open(input_path + '/results/' + file_name + '_scores.pkl', 'wb') as handle:
+        #     pickle.dump(edge_scores, handle, protocol=pickle.HIGHEST_PROTOCOL)
         i += 1
         # cv2.waitKey()
         # cv2.destroyAllWindows()
