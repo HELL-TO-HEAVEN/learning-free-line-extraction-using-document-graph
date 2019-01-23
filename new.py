@@ -199,10 +199,8 @@ def calculate_local_maxima_mask(image):
     return ft.reduce(op.or_, local_maxima_result).astype(np.uint8)
 
 
-
 def time_print(msg):
     print('[' + str(datetime.datetime.now()) + ']', msg)
-
 
 
 # -
@@ -210,8 +208,12 @@ def time_print(msg):
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # this is done iteratively, until all vertexes have a degree of three or more!
 def remove_one_degree_edges(skeleton, iter_index):
-    cv2.imwrite('skel_' + str(iter_index) + '.png', skeleton.astype(np.uint8) * 255)
+    def identical(e1, e2):
+        return e1[0] == e2[0] and e1[1] == e2[1]
 
+    cv2.imwrite('skel_' + str(iter_index) + '.png', skeleton.astype(np.uint8) * 255)
+    # important! removes pixels due to vertex removal from previous iteration
+    skeleton = morphology.skeletonize(skeleton)
     # TODO add to paper information about this !!! remove redundant edges
     # summarization shows each edge, its start and end pixel, length, distance, etc
     # ALSO!! it has two types of edges, one that has two vertexes in graph
@@ -226,45 +228,54 @@ def remove_one_degree_edges(skeleton, iter_index):
     # TODO We stop only when there are no more vertexes left with low degree
     # TODO THEN WE EXTRACT THE EDGES - USING BFS ?! NEED TO FIND A GOOD WAY
 
+    try_again = False
+    len_before = len(coords)
     done = False
-    changed = False
     while not done:
+        changed = False
         flat_coords = [tuple(val) for sublist in coords for val in sublist]
-        len_before = len(coords)
-        for item in set(flat_coords):
+        unique_flat_coords = list(set(flat_coords))
+        current = 0
+        while not changed and current < len(unique_flat_coords):
+            item = unique_flat_coords[current]
+            current += 1
             # print('item=', item, 'count=', flat_coords.count(item))
             # 1 degree vertexes are to be removed from graph
             if flat_coords.count(item) < 2:
-                coords = list(filter(lambda x: tuple(x[0]) != item and tuple(x[1]) != item, coords))
-            # 2 degree vertexes need their edges to be merged
-            if flat_coords.count(item) == 2:
+                changed = True
                 fc = list(filter(lambda x: tuple(x[0]) == item or tuple(x[1]) == item, coords))
-                if len(fc) < 2:
-                    continue # TODO CHECK IF THIS IS PROBLIMATIC - ! IF ALL ARE MERGED FOR REAL
-                # print('fc=', fc)
+                coords = list(filter(lambda x: tuple(x[0]) != item and tuple(x[1]) != item, coords))
+                # print('flat_coords.count(item)=', flat_coords.count(item), 'fc=', fc)
+            # 2 degree vertexes need their edges to be merged
+            elif flat_coords.count(item) == 2:
+                changed = True
+                fc = list(filter(lambda x: tuple(x[0]) == item or tuple(x[1]) == item, coords))
+                # print('flat_coords.count(item)=', flat_coords.count(item), 'fc=', fc)
+                if len(fc) != 2:
+                    print('item=', item, 'fc=', fc)
                 coords = list(filter(lambda x: tuple(x[0]) != item and tuple(x[1]) != item, coords))
                 e1_s = fc[0][0]
                 e1_e = fc[0][1]
                 e2_s = fc[1][0]
                 e2_e = fc[1][1]
-
-                # print('e1_s=', e1_s, 'e1_e=', e1_e)
-                # print('e2_s=', e2_s, 'e2_e=', e2_e)
-                # exit()
-                # print(coords)
-                if ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_s, e2_s))):
+                if ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_s, e2_s))) and \
+                        not identical(e1_e, e2_e):
                     coords.append(np.array([e1_e, e2_e]))
-                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_s, e2_e))):
+                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_s, e2_e))) and \
+                        not identical(e1_e, e2_s):
                     coords.append(np.array([e1_e, e2_s]))
-                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_e, e2_s))):
+                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_e, e2_s))) and \
+                        not identical(e1_s, e2_e):
                     coords.append(np.array([e1_s, e2_e]))
-                else:
+                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_e, e2_e))) and \
+                        not identical(e1_s, e2_s):
                     coords.append(np.array([e1_s, e2_s]))
-        if len_before == len(coords):
+                else:
+                    changed = False
+        if not changed:
             done = True
-        else:
-            changed = True
             print('before=', len_before, 'after=', len(coords))
+            try_again = len_before != len(coords)
 
     skel = cv2.cvtColor(skeleton.astype(np.uint8) * 255, cv2.COLOR_GRAY2RGB)
     # cv2.namedWindow('skeleton')
@@ -324,7 +335,7 @@ def remove_one_degree_edges(skeleton, iter_index):
             image[point] = random_color
         colors.append(random_color)
     cv2.imwrite('iter_' + str(iter_index) + '.png', image)
-    return skel, results, changed
+    return skel, results, try_again
 
 
 # ---------------------------------------------------------------------------------
@@ -389,6 +400,8 @@ def ridge_extraction(image_preprocessed):
     edge_dictionary = dict()
     for result in results:
         start, end, edge_list = result
+        if start == end:  # TODO WHY THE GRAPH HAS THESE EDGES? BUG IN LIBRARY?
+            continue
         edge_dictionary[(start, end)] = edge_list
         random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
         while random_color in colors:
@@ -396,7 +409,7 @@ def ridge_extraction(image_preprocessed):
         for point in edge_list:
             image[point] = random_color
         colors.append(random_color)
-    cv2.imwrite('resultFinal.png', image)
+    cv2.imwrite('edges.png', image)
     # cv2.namedWindow('resultFinal')
     # cv2.imshow('resultFinal', image)
     # cv2.waitKey()
@@ -482,9 +495,31 @@ def get_nearby_pixels(u, v, w1, w2, edges_dictionary, max_dist):
 
 
 # ---------------------------------------------------------------------------------
-# calculate_edge_scores - for each edge we calculate its three scores
-# for every combination of two edges connected to it
-def calculate_edge_scores(u, v, edge_dictionary, t_scores):
+# calculate edge t scores using local region only
+#
+def calculate_edge_scores_local(u, v, edge_dictionary, t_scores, max_dist):
+    # print('u=', u, 'v=', v)
+    junction_v_edges = [edge for edge in edge_dictionary
+                        if (edge[0] == v and edge[1] != u) or (edge[0] != u and edge[1] == v)]
+    # print(junction_v_edges)
+    v_edges = [e[0] if e[1] == v else e[1] for e in junction_v_edges]
+    for combination in it.combinations(v_edges, 2):
+        w1, w2 = combination
+        in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary, max_dist=max_dist)
+        uv_vw1 = calculate_abs_angle(in_u, v, in_w1)
+        uv_vw2 = calculate_abs_angle(in_u, v, in_w2)
+        w1v_vw2 = calculate_abs_angle(in_w1, v, in_w2)
+        uv_bridge = np.abs(np.pi - w1v_vw2) + np.abs(np.pi / 2.0 - uv_vw1) + np.abs(np.pi / 2.0 - uv_vw2)
+        vw1_bridge = np.abs(np.pi - uv_vw1) + np.abs(np.pi / 2.0 - uv_vw2) + np.abs(np.pi / 2.0 - w1v_vw2)
+        vw2_bridge = np.abs(np.pi - uv_vw2) + np.abs(np.pi / 2.0 - uv_vw1) + np.abs(np.pi / 2.0 - w1v_vw2)
+        t_scores[(u, v, w1, w2)] = [(u, v, uv_bridge), (v, w1, vw1_bridge), (v, w2, vw2_bridge)]
+
+
+# ---------------------------------------------------------------------------------
+# finds "best" out of local region angle and complete edge angle - for each edge
+# totals 6 possible combinations
+#
+def calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist):
     junction_v_edges = [edge for edge in edge_dictionary
                         if (edge[0] == v and edge[1] != u) or (edge[0] != u and edge[1] == v)]
     v_edges = [e[0] if e[1] == v else e[1] for e in junction_v_edges]
@@ -495,7 +530,7 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores):
     for combination in it.combinations(v_edges, 2):
         w1, w2 = combination
         # get coordinates in radius 9 - then calculate angle
-        in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary, max_dist=9)
+        in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary, max_dist=max_dist)
         # print('in_u=', in_u, 'in_w1=', in_w1,'v=', v, 'in_w2=', in_w2)
         u_s = [u, in_u]
         w1_s = [w1, in_w1]
@@ -522,8 +557,8 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
     t_scores = dict()
     for edge in edge_dictionary:
         u, v = edge
-        calculate_edge_scores(u, v, edge_dictionary, t_scores)
-        calculate_edge_scores(v, u, edge_dictionary, t_scores)
+        calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist=7)
+        calculate_edge_scores(v, u, edge_dictionary, t_scores, max_dist=7)
 
     # in greedy manner: find junction in t_scores where u,v v,w1 v,w2 has minimum T score
     # mark u,v as Bridge
@@ -534,8 +569,8 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
     # TODO OPTION 2 - each time check for conflicts, and mark as such
         # add junction to B and L lists
         # check whether new min junction
-    bridges = []
-    links = []
+    bridges = set()
+    links = set()
     time_print('greedy manner labeling ...')
     index = 1
     while t_scores:
@@ -544,7 +579,6 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
         # else:
         #     print(len(t_scores), end=' ')
         index += 1
-        done = True
         # find minimum score for each junction
         min_t_scores = dict()
         for key in t_scores.keys():
@@ -568,17 +602,19 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
         # add to links - CHECK FOR CONFLICT
         two_links = [item for item in t_scores[min_score_key] if item is not min_score]
         # print('two_links=', two_links)
-        new_links = []
-        for link in two_links:
-            e1, e2, _ = link
-            new_link = (e1, e2)
-            if new_link not in edge_dictionary.keys():
-                new_link = (e2, e1)
-            new_links.append(new_link)
-        # check for conflicts before adding them
-        if new_bridge not in links and set(links).isdisjoint(new_links):
-                bridges.append(new_bridge)
-                links.extend(new_links)
+        # add new links to links set
+
+        if new_bridge not in links:
+            bridges.add(new_bridge)
+            for link in two_links:
+                e1, e2, _ = link
+                new_link = (e1, e2)
+                if new_link not in edge_dictionary.keys():
+                    new_link = (e2, e1)
+                links.add(new_link)
+        # check for conflicts before adding them??
+        # add new bridge to bridges set
+
 
         # remove minimum t score junction from t_scores
         t_scores.pop(min_score_key)
@@ -593,10 +629,11 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
     image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
     # cv2.namedWindow('after')
     # cv2.imshow('after', image)
-    cv2.imwrite('after_with_white.png', image)
+    cv2.imwrite('classifications.png', image)
     # cv2.waitKey()
     # cv2.destroyAllWindows()
-    return t_scores
+    exit()
+    return None
 
 
 # ---------------------------------------------------------------------------------
