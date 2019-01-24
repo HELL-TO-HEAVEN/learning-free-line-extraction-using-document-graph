@@ -1,6 +1,6 @@
+import os
 import cv2
 import copy
-import pickle
 import datetime
 import numpy as np
 import random as rd
@@ -65,7 +65,7 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False)
 
     # cv2.namedWindow(window_name)
     # cv2.imshow(window_name, after_ridge_mask)
-    cv2.imwrite(window_name + '.png', after_ridge_mask)
+    # cv2.imwrite(window_name + '.png', after_ridge_mask)
     if wait_flag:
         cv2.waitKey()
         cv2.destroyAllWindows()
@@ -145,12 +145,8 @@ def connected_candidates(pixel, skeleton):
         return tuple(map(op.add, pixel, offset))
 
     def in_bounds_and_true(p):
-        row, col = add_offset(p)
-        if row >=0 and \
-                col >=0 and \
-                row < skeleton.shape[0] and \
-                col < skeleton.shape[1] and \
-                skeleton[row][col]:
+        r, c = add_offset(p)
+        if 0 <= r < skeleton.shape[0] and 0 <= c <= skeleton.shape[1] and skeleton[r][c]:
             return True
         else:
             return False
@@ -207,11 +203,11 @@ def time_print(msg):
 # All vertexes with one degree (take part of one edge only) - they are removed
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # this is done iteratively, until all vertexes have a degree of three or more!
-def remove_one_degree_edges(skeleton, iter_index):
+def remove_one_degree_edges(skeleton, iter_index, file_name):
     def identical(e1, e2):
         return e1[0] == e2[0] and e1[1] == e2[1]
 
-    cv2.imwrite('skel_' + str(iter_index) + '.png', skeleton.astype(np.uint8) * 255)
+    cv2.imwrite('./' + file_name + '/skel_' + str(iter_index) + '.png', skeleton.astype(np.uint8) * 255)
     # important! removes pixels due to vertex removal from previous iteration
     skeleton = morphology.skeletonize(skeleton)
     # TODO add to paper information about this !!! remove redundant edges
@@ -274,12 +270,12 @@ def remove_one_degree_edges(skeleton, iter_index):
                     changed = False
         if not changed:
             done = True
-            print('before=', len_before, 'after=', len(coords))
+            time_print('before= ' + str(len_before) + ' after= ' + str(len(coords)))
             try_again = len_before != len(coords)
 
     skel = cv2.cvtColor(skeleton.astype(np.uint8) * 255, cv2.COLOR_GRAY2RGB)
     # cv2.namedWindow('skeleton')
-    cv2.imwrite('skeleton.png', skel)
+    # cv2.imwrite('skeleton.png', skel)
     # cv2.imshow('skeleton', skel)
     # TODO DISCONNECT EVERY JUNCTION - THIS HELPS BFS CONVERGE FASTER!
     tmp_skel = copy.deepcopy(skeleton)
@@ -299,7 +295,7 @@ def remove_one_degree_edges(skeleton, iter_index):
     # cv2.imshow('skeleton_junctions', skel)
 
     # TODO NOW WE EXTRACT EDGES, FIND BFS (SHORTEST PATH) BETWEEN TWO GIVEN VERTEXES
-    cv2.imwrite('base_' + str(iter_index) + '.png', tmp_skel.astype(np.uint8) * 255)
+    cv2.imwrite('./' + file_name + '/base_' + str(iter_index) + '.png', tmp_skel.astype(np.uint8) * 255)
 
     skel = np.zeros_like(skeleton)
     results = []
@@ -334,13 +330,13 @@ def remove_one_degree_edges(skeleton, iter_index):
         for point in edge_list:
             image[point] = random_color
         colors.append(random_color)
-    cv2.imwrite('iter_' + str(iter_index) + '.png', image)
+    cv2.imwrite('./' + file_name + '/iter_' + str(iter_index) + '.png', image)
     return skel, results, try_again
 
 
 # ---------------------------------------------------------------------------------
 # ridge extraction
-def ridge_extraction(image_preprocessed):
+def ridge_extraction(image_preprocessed, file_name):
     # apply distance transform then normalize image for viewing
     dist_transform = cv2.distanceTransform(image_preprocessed, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     # normalize distance transform to be of values [0,1]
@@ -391,10 +387,10 @@ def ridge_extraction(image_preprocessed):
     results = []
     iter_index = 0
     while changed:
-        print('iter', iter_index)
-        skeleton, results, changed = remove_one_degree_edges(skeleton, iter_index)
+        time_print('iter ' + str(iter_index))
+        skeleton, results, changed = remove_one_degree_edges(skeleton, iter_index, file_name)
         iter_index += 1
-    print('done')
+    time_print('done')
     colors = []
     image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
     edge_dictionary = dict()
@@ -409,7 +405,7 @@ def ridge_extraction(image_preprocessed):
         for point in edge_list:
             image[point] = random_color
         colors.append(random_color)
-    cv2.imwrite('edges.png', image)
+    cv2.imwrite('./' + file_name + '/edges.png', image)
     # cv2.namedWindow('resultFinal')
     # cv2.imshow('resultFinal', image)
     # cv2.waitKey()
@@ -552,7 +548,7 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist):
 
 # ---------------------------------------------------------------------------------
 # calculate_junctions_t_scores
-def calculate_junctions_t_scores(edge_dictionary, skeleton):
+def calculate_junctions_t_scores(edge_dictionary, skeleton, file_name, image_preprocessed):
     time_print('calculating t scores ...')
     t_scores = dict()
     for edge in edge_dictionary:
@@ -573,9 +569,10 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
     links = set()
     time_print('greedy manner labeling ...')
     index = 1
+    time_print('start=' + str(len(t_scores)))
     while t_scores:
         if index % 500 == 0:
-            print(len(t_scores))
+            time_print(len(t_scores))
         # else:
         #     print(len(t_scores), end=' ')
         index += 1
@@ -614,26 +611,34 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton):
                 links.add(new_link)
         # check for conflicts before adding them??
         # add new bridge to bridges set
-
-
         # remove minimum t score junction from t_scores
         t_scores.pop(min_score_key)
         # print('B=', bridges, 'L=', links)
     print()
     skeleton = skeleton.astype(np.uint8)
-    draw_graph_edges(edge_dictionary, skeleton, 'before')
+    # draw_graph_edges(edge_dictionary, skeleton, 'before')
     image = cv2.cvtColor(np.zeros_like(skeleton), cv2.COLOR_GRAY2RGB)
     image = draw_edges(bridges, edge_dictionary, image, (255, 0, 0))
     image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
     rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
     image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
+
+    cv2.imwrite('./' + file_name + '/classifications.png', image)
+
     # cv2.namedWindow('after')
     # cv2.imshow('after', image)
-    cv2.imwrite('classifications.png', image)
+    # cv2.namedWindow('r')
+    # cv2.imshow('r', image_preprocessed)
     # cv2.waitKey()
     # cv2.destroyAllWindows()
-    exit()
-    return None
+    image_preprocessed = cv2.cvtColor(image_preprocessed, cv2.COLOR_GRAY2RGB)
+    image_preprocessed = draw_edges(bridges, edge_dictionary, image_preprocessed, (255, 0, 0))
+    image_preprocessed = draw_edges(links, edge_dictionary, image_preprocessed, (0, 255, 0))
+    # rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
+    image_preprocessed = draw_edges(rest, edge_dictionary, image_preprocessed, (0, 0, 255))
+    cv2.imwrite('./' + file_name + '/overlayed_classifications.png', image_preprocessed)
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
 
 
 # ---------------------------------------------------------------------------------
@@ -648,10 +653,13 @@ def execute(input_path):
         # pre-process image
         time_print('pre-process image...')
         image_preprocessed = pre_process(input_path + image)
+        # create dir for results
+        os.mkdir('results/' + file_name)
+        file_name = 'results/' + file_name
         # extract ridges
         time_print('extract ridges, junctions...')
         # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
-        skeleton, edge_dictionary = ridge_extraction(image_preprocessed)
+        skeleton, edge_dictionary = ridge_extraction(image_preprocessed, file_name)
 
 
 
@@ -680,7 +688,10 @@ def execute(input_path):
         # in greedy manner -
         #   choose the assignment with minimum value for u,v,w - for all junctions for every combination
         # TODO step 1: for each u,v v,w1 v,w2 JUNCTION -> calculate 3 scores: L L B, L B L, L L B distance from T
-        t_scores = calculate_junctions_t_scores(edge_dictionary, skeleton)
+        image_preprocessed[image_preprocessed == 1] = 2
+        image_preprocessed[image_preprocessed == 0] = 1
+        image_preprocessed[image_preprocessed == 2] = 0
+        calculate_junctions_t_scores(edge_dictionary, skeleton, file_name, image_preprocessed * 255)
         # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
         #
         # TODO step 3: some options (depending on result in step 2)
@@ -712,8 +723,8 @@ def execute(input_path):
         # cv2.imshow('overlay_classified_edges', classified_image)
         # cv2.imwrite(input_path + '/results/' + file_name + '_result.png', classified_image)
         # save the graph in a file
-        with open(input_path + '/results/' + file_name + '_graph.pkl', 'wb') as handle:
-            pickle.dump(edge_dictionary, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        # with open(input_path + '/results/' + file_name + '_graph.pkl', 'wb') as handle:
+        #     pickle.dump(edge_dictionary, handle, protocol=pickle.HIGHEST_PROTOCOL)
         # save classifications of each edge in a file
         # with open(input_path + '/results/' + file_name + '_scores.pkl', 'wb') as handle:
         #     pickle.dump(edge_scores, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -730,6 +741,5 @@ def execute(input_path):
 
 
 if __name__ == "__main__":
-    execute("./data/")
-    # execute("_005-1.png")
-    # execute("0010-1.png")
+        execute("./data/original/")
+
