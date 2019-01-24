@@ -1,6 +1,7 @@
 import os
 import cv2
 import copy
+import shutil
 import datetime
 import numpy as np
 import random as rd
@@ -75,7 +76,12 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False)
 # document pre processing
 def pre_process(path):
     # load image as gray-scale,
+
     image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+
+    cv2.imwrite('original_image.png', image)
+    image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=1)
+    cv2.imwrite('dilated_image.png', image)
     # convert to binary using otsu binarization
     image = cv2.threshold(image, 0, 1, cv2.THRESH_OTSU)[1]
     # add white border around image of size 29
@@ -83,6 +89,7 @@ def pre_process(path):
     # on top of that add black border of size 1
     black_border_added = cv2.copyMakeBorder(white_border_added, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 0)
     # cv2.imwrite('black_border_added.png', black_border_added*255)
+    cv2.imwrite('preprocessed_image.png', image * 255)
     return black_border_added
 
 
@@ -146,7 +153,7 @@ def connected_candidates(pixel, skeleton):
 
     def in_bounds_and_true(p):
         r, c = add_offset(p)
-        if 0 <= r < skeleton.shape[0] and 0 <= c <= skeleton.shape[1] and skeleton[r][c]:
+        if 0 <= r < skeleton.shape[0] and 0 <= c < skeleton.shape[1] and skeleton[r][c]:
             return True
         else:
             return False
@@ -654,7 +661,10 @@ def execute(input_path):
         time_print('pre-process image...')
         image_preprocessed = pre_process(input_path + image)
         # create dir for results
-        os.mkdir('results/' + file_name)
+        dirpath = 'results/' + file_name
+        if os.path.exists(dirpath) and os.path.isdir(dirpath):
+            shutil.rmtree(dirpath)
+        os.mkdir(dirpath)
         file_name = 'results/' + file_name
         # extract ridges
         time_print('extract ridges, junctions...')
@@ -741,5 +751,5 @@ def execute(input_path):
 
 
 if __name__ == "__main__":
-        execute("./data/original/")
+        execute("./data/")
 
