@@ -74,22 +74,24 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False)
 
 # ---------------------------------------------------------------------------------
 # document pre processing
-def pre_process(path):
+def pre_process(path, file_name):
     # load image as gray-scale,
 
     image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-
-    cv2.imwrite('original_image.png', image)
-    image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=1)
-    cv2.imwrite('dilated_image.png', image)
+    cv2.imwrite('./' + file_name + '/original_image.png', image)
+    image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=3)
+    cv2.imwrite('./' + file_name + '/dilated_image.png', image)
+    # using gaussian adaptive thresholding
+    image = cv2.adaptiveThreshold(image, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 255, 9)
+    cv2.imwrite('./' + file_name + '/gaus.png', image * 255)
     # convert to binary using otsu binarization
-    image = cv2.threshold(image, 0, 1, cv2.THRESH_OTSU)[1]
+    # image = cv2.threshold(image, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
     # add white border around image of size 29
     white_border_added = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 1)
     # on top of that add black border of size 1
     black_border_added = cv2.copyMakeBorder(white_border_added, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 0)
     # cv2.imwrite('black_border_added.png', black_border_added*255)
-    cv2.imwrite('preprocessed_image.png', image * 255)
+    cv2.imwrite('./' + file_name + '/preprocessed_image.png', black_border_added * 255)
     return black_border_added
 
 
@@ -211,6 +213,11 @@ def time_print(msg):
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # this is done iteratively, until all vertexes have a degree of three or more!
 def remove_one_degree_edges(skeleton, iter_index, file_name):
+    def unique_rows(a):
+        a = np.ascontiguousarray(a)
+        unique_a = np.unique(a.view([('', a.dtype)] * a.shape[1]))
+        return unique_a.view(a.dtype).reshape((unique_a.shape[0], a.shape[1]))
+
     def identical(e1, e2):
         return e1[0] == e2[0] and e1[1] == e2[1]
 
@@ -225,14 +232,17 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
     branch_data = csr.summarise(skeleton)
     coords_cols = (['img-coord-0-%i' % i for i in [1, 0]] +
                    ['img-coord-1-%i' % i for i in [1, 0]])
-    coords = branch_data[coords_cols].values.reshape((-1, 2, 2))
+    # removes duplicate entries! for some reason they are present in the result
+    coords = unique_rows(branch_data[coords_cols].values).reshape((-1, 2, 2))
     # TODO Each Vertex to stay in the graph needs to have a degree of two or more
     # TODO Iteratively, we remove those that have less than two degree
     # TODO We stop only when there are no more vertexes left with low degree
     # TODO THEN WE EXTRACT THE EDGES - USING BFS ?! NEED TO FIND A GOOD WAY
 
     try_again = False
+
     len_before = len(coords)
+
     done = False
     while not done:
         changed = False
@@ -279,6 +289,7 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
             done = True
             time_print('before= ' + str(len_before) + ' after= ' + str(len(coords)))
             try_again = len_before != len(coords)
+            # print(list(map(lambda co: (np.abs(co[0][0]-co[1][0]), np.abs(co[0][1]-co[1][1])), coords)))
 
     skel = cv2.cvtColor(skeleton.astype(np.uint8) * 255, cv2.COLOR_GRAY2RGB)
     # cv2.namedWindow('skeleton')
@@ -346,8 +357,10 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
 def ridge_extraction(image_preprocessed, file_name):
     # apply distance transform then normalize image for viewing
     dist_transform = cv2.distanceTransform(image_preprocessed, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+
     # normalize distance transform to be of values [0,1]
     normalized_dist_transform = cv2.normalize(dist_transform, None, 0, 1.0, cv2.NORM_MINMAX)
+    cv2.imwrite('./' + file_name + '/normalized_dist_transform.png', normalized_dist_transform * 255)
     # extract local maxima pixels -- "ridge pixels"
     dist_maxima_mask = calculate_local_maxima_mask(normalized_dist_transform)
     # retrieve the biggest connected component only
@@ -390,6 +403,8 @@ def ridge_extraction(image_preprocessed, file_name):
     # TODO We stop only when there are no more vertexes left with low degree
     # TODO THEN WE EXTRACT THE EDGES - USING BFS ?! NEED TO FIND A GOOD WAY
 
+    # print('file_name=', file_name)
+    cv2.imwrite('./' + file_name + '/skeleton.png', dist_maxima_mask_biggest_component.astype(np.uint8) * 255)
     changed = True
     results = []
     iter_index = 0
@@ -398,6 +413,7 @@ def ridge_extraction(image_preprocessed, file_name):
         skeleton, results, changed = remove_one_degree_edges(skeleton, iter_index, file_name)
         iter_index += 1
     time_print('done')
+
     colors = []
     image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
     edge_dictionary = dict()
@@ -413,6 +429,7 @@ def ridge_extraction(image_preprocessed, file_name):
             image[point] = random_color
         colors.append(random_color)
     cv2.imwrite('./' + file_name + '/edges.png', image)
+
     # cv2.namedWindow('resultFinal')
     # cv2.imshow('resultFinal', image)
     # cv2.waitKey()
@@ -654,18 +671,21 @@ def execute(input_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
     i = 1
+
     for image in images:
         file_name = image.split('.')[0]
         print('[' + str(i) + '/' + str(len(images)) + ']', file_name)
+        file_name = 'results/' + file_name
+        if os.path.exists(file_name) and os.path.isdir(file_name):
+            shutil.rmtree(file_name)
+        os.mkdir(file_name)
+
         # pre-process image
         time_print('pre-process image...')
-        image_preprocessed = pre_process(input_path + image)
+        image_preprocessed = pre_process(input_path + image, file_name)
         # create dir for results
-        dirpath = 'results/' + file_name
-        if os.path.exists(dirpath) and os.path.isdir(dirpath):
-            shutil.rmtree(dirpath)
-        os.mkdir(dirpath)
-        file_name = 'results/' + file_name
+
+
         # extract ridges
         time_print('extract ridges, junctions...')
         # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
@@ -751,5 +771,6 @@ def execute(input_path):
 
 
 if __name__ == "__main__":
+        #execute("./data/original/")
         execute("./data/")
 
