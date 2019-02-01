@@ -16,8 +16,8 @@ from skimage import morphology
 from os.path import isfile, join
 from decimal import Decimal, getcontext
 
-# from concurrent.futures import ProcessPoolExecutor
-# from concurrent import futures
+from concurrent.futures import ProcessPoolExecutor
+from concurrent import futures
 
 
 # ---------------------------------------------------------------------------------
@@ -44,7 +44,7 @@ def overlay_edges(image, edge_list, color=None):
         if r == 0 and g == 0 and b == 0:
             image_copy[point] = random_color
         else:
-            image_copy[point] = (255, 255, 255)
+            image_copy[point] = (0, 255, 255)
     return image_copy
 
 
@@ -185,7 +185,7 @@ def calculate_local_maxima_mask(image):
             [0, 0, 0, 0, 0],
             [0, 0, 0, 0, 0],
             [0, 0, 0, 0, 0],
-            [0, 0, 0, 1, 0],
+            [0, 0, 0,  1, 0],
         ],
         [
             [0, 0, 1, 0, 0],
@@ -213,6 +213,20 @@ def time_print(msg):
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # this is done iteratively, until all vertexes have a degree of three or more!
 def remove_one_degree_edges(skeleton, iter_index, file_name):
+    def in_bounds(p):
+        r, c = p
+        if 0 <= r < skeleton.shape[1] and 0 <= c < skeleton.shape[0]:
+            return True
+        else:
+            return False
+
+    def add_range(tup):
+        v_x, v_y = tup
+        max_dist_v = [x for x in range(-7, 7 + 1)]
+        max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
+        max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
+        return [(x, y) for x in max_dist_candidates_x for y in max_dist_candidates_y if in_bounds((x, y))]
+
     def unique_rows(a):
         a = np.ascontiguousarray(a)
         unique_a = np.unique(a.view([('', a.dtype)] * a.shape[1]))
@@ -234,6 +248,7 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
                    ['img-coord-1-%i' % i for i in [1, 0]])
     # removes duplicate entries! for some reason they are present in the result
     coords = unique_rows(branch_data[coords_cols].values).reshape((-1, 2, 2))
+
     # TODO Each Vertex to stay in the graph needs to have a degree of two or more
     # TODO Iteratively, we remove those that have less than two degree
     # TODO We stop only when there are no more vertexes left with low degree
@@ -242,6 +257,12 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
     try_again = False
 
     len_before = len(coords)
+    # TODO The 4 corners are exluded from this process. they are needed as anchors.
+    excludes = [(0, 0), (skeleton.shape[1], 0), (0, skeleton.shape[0]), (skeleton.shape[1], skeleton.shape[0])]
+    exclude = []
+    excluded = []
+    for ex in excludes:
+        exclude.extend(add_range(ex))
 
     done = False
     while not done:
@@ -255,8 +276,11 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
             # print('item=', item, 'count=', flat_coords.count(item))
             # 1 degree vertexes are to be removed from graph
             if flat_coords.count(item) < 2:
+                # print('item=', item)
+                if item in exclude:
+                    excluded.append((item[1], item[0]))
+                    continue
                 changed = True
-                fc = list(filter(lambda x: tuple(x[0]) == item or tuple(x[1]) == item, coords))
                 coords = list(filter(lambda x: tuple(x[0]) != item and tuple(x[1]) != item, coords))
                 # print('flat_coords.count(item)=', flat_coords.count(item), 'fc=', fc)
             # 2 degree vertexes need their edges to be merged
@@ -349,7 +373,7 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
             image[point] = random_color
         colors.append(random_color)
     cv2.imwrite('./' + file_name + '/iter_' + str(iter_index) + '.png', image)
-    return skel, results, try_again
+    return skel, results, excluded, try_again
 
 
 # ---------------------------------------------------------------------------------
@@ -410,7 +434,7 @@ def ridge_extraction(image_preprocessed, file_name):
     iter_index = 0
     while changed:
         time_print('iter ' + str(iter_index))
-        skeleton, results, changed = remove_one_degree_edges(skeleton, iter_index, file_name)
+        skeleton, results, excluded, changed = remove_one_degree_edges(skeleton, iter_index, file_name)
         iter_index += 1
     time_print('done')
 
@@ -434,7 +458,11 @@ def ridge_extraction(image_preprocessed, file_name):
     # cv2.imshow('resultFinal', image)
     # cv2.waitKey()
     # cv2.destroyAllWindows()
-    return skeleton, edge_dictionary
+
+    # get vertexes
+    graph_vertexes = list(set([tuple(val) for sublist in edge_dictionary.keys() for val in sublist]))
+
+    return skeleton, edge_dictionary, graph_vertexes, excluded
 
 
 # ---------------------------------------------------------------------------------
@@ -465,6 +493,41 @@ def calculate_abs_angle(u, v, w):
     val = dot / (norma_1 * norma_2)
 
     return np.abs(np.arccos(float(val)))
+
+
+def get_nearby_pixels_two_edges(v, w1, w2, edges_dictionary, max_dist):
+    v_x, v_y = v
+    max_dist_v = [x for x in range(-max_dist, max_dist + 1)]
+    max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
+    max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
+
+    left_column = list(map(lambda e: (v_x - max_dist, e), max_dist_candidates_y))
+    right_column = list(map(lambda e: (v_x + max_dist, e), max_dist_candidates_y))
+    top_column = list(map(lambda e: (e, v_y - max_dist), max_dist_candidates_x))
+    bottom_column = list(map(lambda e: (e, v_y + max_dist), max_dist_candidates_x))
+
+    junction_pixels = dict()
+    if tuple([v, w1]) in edges_dictionary.keys():
+        junction_pixels[tuple([v, w1])] = edges_dictionary[tuple([v, w1])]
+    else:
+        junction_pixels[tuple([v, w1])] = edges_dictionary[tuple([w1, v])]
+
+    if tuple([v, w2]) in edges_dictionary.keys():
+        junction_pixels[tuple([v, w2])] = edges_dictionary[tuple([v, w2])]
+    else:
+        junction_pixels[tuple([v, w2])] = edges_dictionary[tuple([w2, v])]
+
+    w1_in_radius = [i for i in left_column + right_column + top_column + bottom_column
+                    if i in junction_pixels[(v, w1)]]
+    if len(w1_in_radius) == 0:
+        w1_in_radius = [w1]
+
+    w2_in_radius = [i for i in left_column + right_column + top_column + bottom_column
+                    if i in junction_pixels[(v, w2)]]
+    if len(w2_in_radius) == 0:
+        w2_in_radius = [w2]
+
+    return w1_in_radius[0], w2_in_radius[0]
 
 
 # ---------------------------------------------------------------------------------
@@ -539,7 +602,7 @@ def calculate_edge_scores_local(u, v, edge_dictionary, t_scores, max_dist):
 # finds "best" out of local region angle and complete edge angle - for each edge
 # totals 6 possible combinations
 #
-def calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist):
+def calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist):
     junction_v_edges = [edge for edge in edge_dictionary
                         if (edge[0] == v and edge[1] != u) or (edge[0] != u and edge[1] == v)]
     v_edges = [e[0] if e[1] == v else e[1] for e in junction_v_edges]
@@ -549,6 +612,10 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist):
     # other side below...
     for combination in it.combinations(v_edges, 2):
         w1, w2 = combination
+        print(w1)
+        print(excluded)
+        if w1 in excluded or w2 in excluded:
+            continue
         # get coordinates in radius 9 - then calculate angle
         in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary, max_dist=max_dist)
         # print('in_u=', in_u, 'in_w1=', in_w1,'v=', v, 'in_w2=', in_w2)
@@ -572,23 +639,119 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist):
 
 # ---------------------------------------------------------------------------------
 # calculate_junctions_t_scores
-def calculate_junctions_t_scores(edge_dictionary, skeleton, file_name, image_preprocessed):
+def calculate_junctions_t_scores(edge_dictionary, excluded):
     time_print('calculating t scores ...')
     t_scores = dict()
     for edge in edge_dictionary:
+        # new t_scores added to t_scores variable inside calculate_edge_scores
         u, v = edge
-        calculate_edge_scores(u, v, edge_dictionary, t_scores, max_dist=7)
-        calculate_edge_scores(v, u, edge_dictionary, t_scores, max_dist=7)
+        print(u)
+        print(v)
+        print(excluded)
+        if u in excluded or v in excluded:
+            continue
+        calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist=7)
+        calculate_edge_scores(v, u, edge_dictionary, t_scores, excluded, max_dist=7)
+    # return all possibilities
+    return t_scores
 
-    # in greedy manner: find junction in t_scores where u,v v,w1 v,w2 has minimum T score
+
+# ---------------------------------------------------------------------------------
+# calculate minimum l_score for each vertex
+def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7):
+
+    vertexes_l_scores = dict()
+    for vertex in vertexes:
+        if vertex in excluded:
+            print('vertex=', vertex)
+            continue
+        # print('v=', vertex)
+        # get list of edges that that vertex is part of
+        edges_of_vertex = [e for e in edge_dictionary.keys() if e[0] == vertex or e[1] == vertex]
+        # print('edges_of_v=', edges_of_vertex)
+        junction_l_scores = dict()
+        junctions = []
+        l_scores = []
+        for combination in it.combinations(edges_of_vertex, 2):
+            e1, e2 = combination
+            e1_e1, e1_e2 = e1
+            e2_e1, e2_e2 = e2
+            if e1_e1 in excluded or e1_e2 in excluded or e2_e1 in excluded or e2_e2 in excluded:
+                print ('e1_e1=', e1_e1, 'e1_e2=', e2_e2, 'e2_e1=', e2_e1, 'e2_e2=', e2_e2)
+                continue
+            # print('e1=', e1, 'e2=', e2)
+            w1 = e1[0] if e1[0] != vertex else e1[1]
+            w2 = e2[0] if e2[0] != vertex else e2[1]
+            # print('w1=', w1, 'w2=', w2)
+
+            # get coordinates in radius 9 - then calculate angle
+            in_w1, in_w2 = get_nearby_pixels_two_edges(vertex, w1, w2, edge_dictionary, max_dist=max_dist)
+
+            angle_w1v_vw2 = calculate_abs_angle(in_w1, vertex, in_w2)
+
+            edges_of_w1 = [e for e in edge_dictionary.keys() if e[0] == w1 and e[1] != vertex
+                           or e[1] == w1 and e[0] != vertex]
+            edges_of_w2 = [e for e in edge_dictionary.keys() if e[0] == w2 and e[1] != vertex
+                           or e[1] == w2 and e[0] != vertex]
+            # print('edges_of_w1=', edges_of_w1)
+            # print('edges_of_w2=', edges_of_w2)
+            for edge_of_w1 in edges_of_w1:
+                w1_e1, w1_e2 = edge_of_w1
+                if w1_e1 in excluded or w1_e2 in excluded:
+                    print('w1_e1=', w1_e1, 'w1_e2=', w1_e2)
+                    continue
+                z1 = edge_of_w1[0] if edge_of_w1[0] != w1 else edge_of_w1[1]
+                in_v, in_z1 = get_nearby_pixels_two_edges(w1, vertex, z1, edge_dictionary, max_dist=max_dist)
+                # print('z1=', z1)
+                angle_z1w1_w1v = calculate_abs_angle(in_z1, w1, in_v)
+                for edge_of_w2 in edges_of_w2:
+                    w2_e1, w2_e2 = edge_of_w2
+                    if w2_e1 in excluded or w2_e2 in excluded:
+                        print('w2_e1=', w2_e1, 'w2_e2=', w2_e2)
+                        continue
+                    z2 = edge_of_w2[0] if edge_of_w2[0] != w2 else edge_of_w2[1]
+                    in_v, in_z2 = get_nearby_pixels_two_edges(w2, vertex, z2, edge_dictionary, max_dist=max_dist)
+                    # print('z2=', z2)
+                    angle_z2w2_w2v = calculate_abs_angle(in_z2, w2, in_v)
+                    junctions.append((z1, w1, vertex, w2, z2))
+                    if z1 in excluded:
+                        print('ERROR: z1=', z1)
+                    if w1 in excluded:
+                        print('ERROR: w1=', w1)
+                    if vertex in excluded:
+                        print('ERROR: vertex=', vertex)
+                    if w2 in excluded:
+                        print('ERROR: w2=', w2)
+                    if z2 in excluded:
+                        print('ERROR: z2=', z2)
+
+                    l_scores.append(np.abs(np.pi - angle_w1v_vw2) * 0.5 +
+                                    np.abs(np.pi - angle_z1w1_w1v) * 0.25 +
+                                    np.abs(np.pi - angle_z2w2_w2v) * 0.25)
+                    junction_l_scores[(z1, w1, vertex, w2, z2)] = np.abs(np.pi - angle_w1v_vw2) * 0.5 + \
+                                                                  np.abs(np.pi - angle_z1w1_w1v) * 0.25 + \
+                                                                  np.abs(np.pi - angle_z2w2_w2v) * 0.25
+        # print(junction_l_scores)
+        # min_junction = junctions[np.argmin(l_scores)]
+        # print('min junction=', min_junction, 'min score=', min_score)
+        min_score = np.min(l_scores)
+        vertexes_l_scores[vertex] = min_score
+    # print(vertexes_l_scores)
+    return vertexes_l_scores
+
+
+# ---------------------------------------------------------------------------------
+#
+def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_preprocessed, score_type):
+    # in greedy manner: find junction in v_scores where u,v v,w1 v,w2 has minimum T score
     # mark u,v as Bridge
     # mark v,w1 and v,w2 as Link
     # TODO OPTION 1 - 100% greedy - and remove conflicts on the go
-        # remove all u,v from t_scores marked as L
-        # remove all v,w1 and v,w2 from t_scores marked as B
+    # remove all u,v from v_scores marked as L
+    # remove all v,w1 and v,w2 from v_scores marked as B
     # TODO OPTION 2 - each time check for conflicts, and mark as such
-        # add junction to B and L lists
-        # check whether new min junction
+    # add junction to B and L lists
+    # check whether new min junction
     bridges = set()
     links = set()
     time_print('greedy manner labeling ...')
@@ -660,9 +823,37 @@ def calculate_junctions_t_scores(edge_dictionary, skeleton, file_name, image_pre
     image_preprocessed = draw_edges(links, edge_dictionary, image_preprocessed, (0, 255, 0))
     # rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
     image_preprocessed = draw_edges(rest, edge_dictionary, image_preprocessed, (0, 0, 255))
-    cv2.imwrite('./' + file_name + '/overlayed_classifications.png', image_preprocessed)
-    # cv2.waitKey()
-    # cv2.destroyAllWindows()
+    time_print('SAVED: ./' + file_name + '/overlayed_classifications' + score_type + '.png')
+    cv2.imwrite('./' + file_name + '/overlayed_classifications' + score_type + '.png', image_preprocessed)
+
+
+# ---------------------------------------------------------------------------------
+#
+def create_v_scores(t_scores, l_scores):
+    def normalise(max_val, min_val, val):
+        return (val - min_val) / (max_val - min_val)
+
+    # normalise t_scores [0, 1]
+    all_scores = [x[2] for value in t_scores.values() for x in value]
+    max_t = np.max(all_scores)
+    min_t = np.min(all_scores)
+
+    l_values = list(l_scores.values())
+    max_l = np.max(l_values)
+    min_l = np.min(l_values)
+
+    # normalise l_scores [0, 1]
+    # we add v l_score to the correct places in t_scores dictionary
+    v_scores = dict()
+    for t_score in t_scores.keys():
+        v = t_score[1]
+        l_score = l_scores[v]
+        scores = t_scores[t_score]
+        v_score = list(map(lambda x: (x[0], x[1], normalise(max_t, min_t, x[2]) +
+                                      normalise(max_l, min_l, l_score)), scores))
+        v_scores[t_score] = v_score
+
+    return v_scores
 
 
 # ---------------------------------------------------------------------------------
@@ -685,13 +876,10 @@ def execute(input_path):
         image_preprocessed = pre_process(input_path + image, file_name)
         # create dir for results
 
-
         # extract ridges
         time_print('extract ridges, junctions...')
         # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
-        skeleton, edge_dictionary = ridge_extraction(image_preprocessed, file_name)
-
-
+        skeleton, edge_dictionary, vertexes, excluded = ridge_extraction(image_preprocessed, file_name)
 
         # mark junction pixels
         # time_print('mark junction pixels...')
@@ -718,10 +906,18 @@ def execute(input_path):
         # in greedy manner -
         #   choose the assignment with minimum value for u,v,w - for all junctions for every combination
         # TODO step 1: for each u,v v,w1 v,w2 JUNCTION -> calculate 3 scores: L L B, L B L, L L B distance from T
+        # TODO step 1: for each vertex V, calculate minimum l_score
         image_preprocessed[image_preprocessed == 1] = 2
         image_preprocessed[image_preprocessed == 0] = 1
         image_preprocessed[image_preprocessed == 2] = 0
-        calculate_junctions_t_scores(edge_dictionary, skeleton, file_name, image_preprocessed * 255)
+        # calculate t_scores for v
+        t_scores = calculate_junctions_t_scores(edge_dictionary, excluded)
+        # calculate l_scores for v
+        l_scores = calculate_junctions_l_scores(edge_dictionary, vertexes, excluded)
+        # classify using both t_scores and l_scores for v
+        v_scores = create_v_scores(t_scores, l_scores)
+
+        greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 'v_scores')
         # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
         #
         # TODO step 3: some options (depending on result in step 2)
@@ -770,7 +966,53 @@ def execute(input_path):
         # cv2.destroyAllWindows()
 
 
+def process_image_parallel(image_data, len_images, input_path):
+    i, image = image_data
+    file_name = image.split('.')[0]
+    print('[' + str(i) + '/' + str(len_images) + ']', file_name)
+    file_name = 'results/' + file_name
+    if os.path.exists(file_name) and os.path.isdir(file_name):
+        shutil.rmtree(file_name)
+    os.mkdir(file_name)
+
+    # pre-process image
+    time_print('pre-process image...')
+    image_preprocessed = pre_process(input_path + image, file_name)
+    # create dir for results
+    # extract ridges
+    time_print('extract ridges, junctions...')
+    # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
+    skeleton, edge_dictionary, graph_vertexes, excluded = ridge_extraction(image_preprocessed, file_name)
+    image_preprocessed[image_preprocessed == 1] = 2
+    image_preprocessed[image_preprocessed == 0] = 1
+    image_preprocessed[image_preprocessed == 2] = 0
+    # calculate t_scores for v
+    t_scores = calculate_junctions_t_scores(edge_dictionary, excluded)
+    # calculate l_scores for v
+    l_scores = calculate_junctions_l_scores(edge_dictionary, graph_vertexes, excluded)
+    # classify using both t_scores and l_scores for v
+    v_scores = create_v_scores(t_scores, l_scores)
+    greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 'v_scores')
+    greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 't_scores')
+
+
+    return i
+
+
+# ---------------------------------------------------------------------------------
+# main execution function
+def execute_parallel(input_path):
+    # retrieve list of images
+    images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
+
+    pool = ProcessPoolExecutor(max_workers=30)
+    wait_for = [pool.submit(process_image_parallel, image, len(images), input_path) for image in zip(range(1, len(images)), images)]
+    # results = [f.result() for f in futures.as_completed(wait_for)]
+    for f in futures.as_completed(wait_for):
+        time_print(str(f.result()) + ' done!')
+
+
 if __name__ == "__main__":
-        #execute("./data/original/")
+        # execute_parallel("./data/original/")
         execute("./data/")
 
