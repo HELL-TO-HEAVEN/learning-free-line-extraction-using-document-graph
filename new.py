@@ -211,8 +211,9 @@ def time_print(msg):
 # -
 # All vertexes with one degree (take part of one edge only) - they are removed
 # All vertexes with two degree (take part of two edges exactly) - they are merged
+# if three edges create a three edged circle: (u,v) (v,w) (w,u), we remove (w,u)
 # this is done iteratively, until all vertexes have a degree of three or more!
-def remove_one_degree_edges(skeleton, iter_index, file_name):
+def prune_graph(skeleton, iter_index, file_name):
     def in_bounds(p):
         r, c = p
         if 0 <= r < skeleton.shape[1] and 0 <= c < skeleton.shape[0]:
@@ -339,8 +340,10 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
     # TODO NOW WE EXTRACT EDGES, FIND BFS (SHORTEST PATH) BETWEEN TWO GIVEN VERTEXES
     cv2.imwrite('./' + file_name + '/base_' + str(iter_index) + '.png', tmp_skel.astype(np.uint8) * 255)
 
-    skel = np.zeros_like(skeleton)
+    # create results, for each edge, we find its corresponding pixels
+    # result list contains edge information: (start, end, [pixels])
     results = []
+    results_dict = dict()
     for edge in coords:
         start, end = edge
         start = (start[1], start[0])
@@ -359,9 +362,66 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
         tmp_skel[start] = False
         tmp_skel[end] = False
         results.append((start, end, result))
-        for point in result:
+        results_dict[(start, end)] = result
+
+    # filter out circles -> (u,v) (v,w) (w,u), then (w,u) is removed
+    # (w,u) is the longest line out of the three in a 3-edge circle
+    remove_candidates = set()
+    for result in results_dict.keys():
+        v, u = result
+        candidates_v = [e for e in results_dict.keys() if v in e and u not in e]
+        candidates_v_w = [e[0] if e[1] == v else e[1] for e in candidates_v]
+        candidates_u = [e for e in results_dict.keys() if u in e and v not in e]
+        candidates_u_w = [e[0] if e[1] == u else e[1] for e in candidates_u]
+        for vw in candidates_v_w:
+            for uw in candidates_u_w:
+                if vw == uw:
+                    w = vw
+                    if (v, u) in results_dict.keys():
+                        candidate_vu = (v, u)
+                        len_vu = len(results_dict[(v, u)])
+                    else:
+                        candidate_vu = (u, v)
+                        len_vu = len(results_dict[(u, v)])
+
+                    if (w, v) in results_dict.keys():
+                        candidate_wv = (w, v)
+                        len_wv = len(results_dict[(w, v)])
+                    else:
+                        candidate_wv = (v, w)
+                        len_wv = len(results_dict[(v, w)])
+
+                    if (u, w) in results_dict.keys():
+                        candidate_uw = (u, w)
+                        len_uw = len(results_dict[(u, w)])
+                    else:
+                        candidate_uw = (w, u)
+                        len_uw = len(results_dict[(w, u)])
+                    if len_vu > len_uw and len_vu > len_wv:
+                        remove_candidates.add(candidate_vu)
+                    elif len_uw > len_vu and len_uw > len_wv:
+                        remove_candidates.add(candidate_uw)
+                    elif len_wv > len_vu and len_wv > len_vu:
+                        remove_candidates.add(candidate_wv)
+    # remove all edges that create a 3-edged circle,
+    # for each edge the removed edge is the longest of all 3-edges of the circle
+    time_print('removing circles ...')
+    remove_items = [(edge[0], edge[1], results_dict.pop(edge)) for edge in remove_candidates]
+    # if no edge was removed above, but a circle is removed, we need a new iteration due to changes.
+    if remove_items:
+        try_again = True
+    time_print('before= ' + str(len(results)) + ' to_remove= ' + str(len(remove_items)))
+    results = list(filter(lambda element: element not in remove_items, results))
+
+    # create new skeleton following graph pruning
+    skel = np.zeros_like(skeleton)
+    for result in results:
+        u, v, pixel_list = result
+        for point in pixel_list:
             skel[point] = True
 
+
+    # create result image after iteration is done and store to image for illustration
     colors = []
     image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
     for result in results:
@@ -432,9 +492,10 @@ def ridge_extraction(image_preprocessed, file_name):
     changed = True
     results = []
     iter_index = 0
+    time_print('pruning redundant edges and circles...')
     while changed:
         time_print('iter ' + str(iter_index))
-        skeleton, results, excluded, changed = remove_one_degree_edges(skeleton, iter_index, file_name)
+        skeleton, results, excluded, changed = prune_graph(skeleton, iter_index, file_name)
         iter_index += 1
     time_print('done')
 
@@ -659,7 +720,7 @@ def calculate_junctions_t_scores(edge_dictionary, excluded):
 # ---------------------------------------------------------------------------------
 # calculate minimum l_score for each vertex
 def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7):
-
+    time_print('calculating l scores ...')
     vertexes_l_scores = dict()
     for vertex in vertexes:
         if vertex in excluded:
@@ -813,8 +874,8 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_
     image_preprocessed = draw_edges(links, edge_dictionary, image_preprocessed, (0, 255, 0))
     # rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
     image_preprocessed = draw_edges(rest, edge_dictionary, image_preprocessed, (0, 0, 255))
-    time_print('SAVED: ./' + file_name + '/overlayed_classifications' + score_type + '.png')
-    cv2.imwrite('./' + file_name + '/overlayed_classifications' + score_type + '.png', image_preprocessed)
+    time_print('SAVED: ./' + file_name + '/overlayed_classifications_' + score_type + '.png')
+    cv2.imwrite('./' + file_name + '/overlayed_classifications_' + score_type + '.png', image_preprocessed)
 
 
 # ---------------------------------------------------------------------------------
@@ -908,6 +969,8 @@ def execute(input_path):
         v_scores = create_v_scores(t_scores, l_scores)
 
         greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 'v_scores')
+        greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 't_scores')
+
         # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
         #
         # TODO step 3: some options (depending on result in step 2)
