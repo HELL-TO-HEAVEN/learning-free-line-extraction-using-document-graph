@@ -257,7 +257,7 @@ def remove_one_degree_edges(skeleton, iter_index, file_name):
     try_again = False
 
     len_before = len(coords)
-    # TODO The 4 corners are exluded from this process. they are needed as anchors.
+    # TODO The 4 corners are excluded from this process. they are needed as anchors.
     excludes = [(0, 0), (skeleton.shape[1], 0), (0, skeleton.shape[0]), (skeleton.shape[1], skeleton.shape[0])]
     exclude = []
     excluded = []
@@ -612,8 +612,8 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist):
     # other side below...
     for combination in it.combinations(v_edges, 2):
         w1, w2 = combination
-        print(w1)
-        print(excluded)
+        # print(w1)
+        # print(excluded)
         if w1 in excluded or w2 in excluded:
             continue
         # get coordinates in radius 9 - then calculate angle
@@ -645,9 +645,9 @@ def calculate_junctions_t_scores(edge_dictionary, excluded):
     for edge in edge_dictionary:
         # new t_scores added to t_scores variable inside calculate_edge_scores
         u, v = edge
-        print(u)
-        print(v)
-        print(excluded)
+        # print(u)
+        # print(v)
+        # print(excluded)
         if u in excluded or v in excluded:
             continue
         calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist=7)
@@ -663,7 +663,7 @@ def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7
     vertexes_l_scores = dict()
     for vertex in vertexes:
         if vertex in excluded:
-            print('vertex=', vertex)
+            # print('vertex=', vertex)
             continue
         # print('v=', vertex)
         # get list of edges that that vertex is part of
@@ -677,7 +677,7 @@ def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7
             e1_e1, e1_e2 = e1
             e2_e1, e2_e2 = e2
             if e1_e1 in excluded or e1_e2 in excluded or e2_e1 in excluded or e2_e2 in excluded:
-                print ('e1_e1=', e1_e1, 'e1_e2=', e2_e2, 'e2_e1=', e2_e1, 'e2_e2=', e2_e2)
+                # print ('e1_e1=', e1_e1, 'e1_e2=', e2_e2, 'e2_e1=', e2_e1, 'e2_e2=', e2_e2)
                 continue
             # print('e1=', e1, 'e2=', e2)
             w1 = e1[0] if e1[0] != vertex else e1[1]
@@ -698,7 +698,7 @@ def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7
             for edge_of_w1 in edges_of_w1:
                 w1_e1, w1_e2 = edge_of_w1
                 if w1_e1 in excluded or w1_e2 in excluded:
-                    print('w1_e1=', w1_e1, 'w1_e2=', w1_e2)
+                    # print('w1_e1=', w1_e1, 'w1_e2=', w1_e2)
                     continue
                 z1 = edge_of_w1[0] if edge_of_w1[0] != w1 else edge_of_w1[1]
                 in_v, in_z1 = get_nearby_pixels_two_edges(w1, vertex, z1, edge_dictionary, max_dist=max_dist)
@@ -707,23 +707,13 @@ def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7
                 for edge_of_w2 in edges_of_w2:
                     w2_e1, w2_e2 = edge_of_w2
                     if w2_e1 in excluded or w2_e2 in excluded:
-                        print('w2_e1=', w2_e1, 'w2_e2=', w2_e2)
+                        # print('w2_e1=', w2_e1, 'w2_e2=', w2_e2)
                         continue
                     z2 = edge_of_w2[0] if edge_of_w2[0] != w2 else edge_of_w2[1]
                     in_v, in_z2 = get_nearby_pixels_two_edges(w2, vertex, z2, edge_dictionary, max_dist=max_dist)
                     # print('z2=', z2)
                     angle_z2w2_w2v = calculate_abs_angle(in_z2, w2, in_v)
                     junctions.append((z1, w1, vertex, w2, z2))
-                    if z1 in excluded:
-                        print('ERROR: z1=', z1)
-                    if w1 in excluded:
-                        print('ERROR: w1=', w1)
-                    if vertex in excluded:
-                        print('ERROR: vertex=', vertex)
-                    if w2 in excluded:
-                        print('ERROR: w2=', w2)
-                    if z2 in excluded:
-                        print('ERROR: z2=', z2)
 
                     l_scores.append(np.abs(np.pi - angle_w1v_vw2) * 0.5 +
                                     np.abs(np.pi - angle_z1w1_w1v) * 0.25 +
