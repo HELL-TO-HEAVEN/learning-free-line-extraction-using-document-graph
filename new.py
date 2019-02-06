@@ -16,8 +16,9 @@ from skimage import morphology
 from os.path import isfile, join
 from decimal import Decimal, getcontext
 
-from concurrent.futures import ProcessPoolExecutor
 from concurrent import futures
+from sklearn.cluster import KMeans
+from concurrent.futures import ProcessPoolExecutor
 
 
 # ---------------------------------------------------------------------------------
@@ -75,24 +76,85 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False)
 # ---------------------------------------------------------------------------------
 # document pre processing
 def pre_process(path, file_name):
+    def cluster_elements(all_stats):
+        n_clusters = 11
+        data_list = [stat[5] for stat in all_stats]
+        # print('data_list=', data_list)
+        data = np.asarray(data_list).reshape(-1, 1)
+        k_means = KMeans(n_clusters=n_clusters)
+        k_means.fit(data)
+        y_k_means = k_means.predict(data)
+
+        cluster_size = [len(list(filter(lambda x: x == i, y_k_means))) for i in range(n_clusters)]
+        # print('cluster_size=', cluster_size)
+        # print('y_k_means=', list(y_k_means))
+        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), data_list), 0)
+                         for i in range(n_clusters)]
+        minimum_cluster = np.argmin([x[1]/x[0] for x in zip(cluster_size, cluster_total)])
+        # print('cluster_total=', cluster_total)
+        # print('min_cluster=', minimum_cluster)
+        # exit()
+        return y_k_means, minimum_cluster
+
     # load image as gray-scale,
 
     image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     cv2.imwrite('./' + file_name + '/original_image.png', image)
-    image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=3)
-    cv2.imwrite('./' + file_name + '/dilated_image.png', image)
+    # image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=3)
+    # cv2.imwrite('./' + file_name + '/dilated_image.png', image)
     # using gaussian adaptive thresholding
-    image = cv2.adaptiveThreshold(image, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 255, 9)
+    image = cv2.adaptiveThreshold(image, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 255, 9)
     cv2.imwrite('./' + file_name + '/gaus.png', image * 255)
     # convert to binary using otsu binarization
     # image = cv2.threshold(image, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    # remove small connected components - aim for smallest 10% and in an increasing step until 2x size
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=8, ltype=cv2.CV_32S)
+    stats = np.asarray([np.append(stat[0], stat[1]) for stat in zip(range(num_labels), stats)])
+
+    results, min_cluster = cluster_elements(stats)
+    index = 0
+    time_print('elements to be deleted: ' + str(np.count_nonzero(results == 0)))
+    for clustered in results:
+        if clustered == min_cluster:
+            # print('deleted:', index, 'size=', stats[index, 5])
+            labels[labels == index] = 0
+        index += 1
+
+    labels[labels != 0] = 1
+    # cv2.namedWindow('image')
+    # cv2.imshow('image', image * 255)
+    image_no_tiny_elements = op.and_(image, labels.astype(np.uint8))
+    # invert colors
+    # image_no_tiny_elements = 1 - image_no_tiny_elements
+    # image = 1 - image
+
+    # cv2.namedWindow('res')
+    # cv2.imshow('res', res * 255)
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
+
+    # print('components_to_delete=', components_to_delete)
+    # print('num_labels=', num_labels)
+    # print('labels=', labels)
+    # print('stats=', stats)
+    # print('centroids=', centroids)
+
     # add white border around image of size 29
-    white_border_added = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 1)
+    white_border_added_image = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 0)
+    white_border_added_image_no_tiny_elements = cv2.copyMakeBorder(image_no_tiny_elements, 29, 29, 29, 29,
+                                                                   cv2.BORDER_CONSTANT, None, 0)
     # on top of that add black border of size 1
-    black_border_added = cv2.copyMakeBorder(white_border_added, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 0)
-    # cv2.imwrite('black_border_added.png', black_border_added*255)
+    black_border_added = cv2.copyMakeBorder(white_border_added_image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
+    black_border_added_no_tiny_elements = cv2.copyMakeBorder(white_border_added_image_no_tiny_elements,
+                                                             1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
+    # invert images (now black is black and white is white)
+    black_border_added = 1 - black_border_added
+    black_border_added_no_tiny_elements = 1 - black_border_added_no_tiny_elements
+
     cv2.imwrite('./' + file_name + '/preprocessed_image.png', black_border_added * 255)
-    return black_border_added
+    cv2.imwrite('./' + file_name + '/preprocessed_image_no_tiny_elements.png', black_border_added_no_tiny_elements * 255)
+
+    return black_border_added, black_border_added_no_tiny_elements
 
 
 # ---------------------------------------------------------------------------------
@@ -213,7 +275,7 @@ def time_print(msg):
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # if three edges create a three edged circle: (u,v) (v,w) (w,u), we remove (w,u)
 # this is done iteratively, until all vertexes have a degree of three or more!
-def prune_graph(skeleton, iter_index, file_name):
+def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
     def in_bounds(p):
         r, c = p
         if 0 <= r < skeleton.shape[1] and 0 <= c < skeleton.shape[0]:
@@ -793,7 +855,21 @@ def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7
 
 # ---------------------------------------------------------------------------------
 #
-def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_preprocessed, score_type):
+def overlay_and_save(bridges, links, rest, edge_dictionary, image_preprocessed, file_name, score_type):
+    image = 1 - image_preprocessed
+    image *= 255
+    image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    image = draw_edges(bridges, edge_dictionary, image, (255, 0, 0))
+    image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
+    # rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
+    image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
+    time_print('SAVED: ./' + file_name + '/overlayed_classifications_' + score_type + '.png')
+    cv2.imwrite('./' + file_name + '/overlayed_classifications_' + score_type + '.png', image)
+
+
+# ---------------------------------------------------------------------------------
+#
+def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_type):
     # in greedy manner: find junction in v_scores where u,v v,w1 v,w2 has minimum T score
     # mark u,v as Bridge
     # mark v,w1 and v,w2 as Link
@@ -861,7 +937,7 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_
     rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
     image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
 
-    cv2.imwrite('./' + file_name + '/classifications.png', image)
+    cv2.imwrite('./' + file_name + '/classifications_' + score_type + '.png', image)
 
     # cv2.namedWindow('after')
     # cv2.imshow('after', image)
@@ -869,13 +945,7 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_
     # cv2.imshow('r', image_preprocessed)
     # cv2.waitKey()
     # cv2.destroyAllWindows()
-    image_preprocessed = cv2.cvtColor(image_preprocessed, cv2.COLOR_GRAY2RGB)
-    image_preprocessed = draw_edges(bridges, edge_dictionary, image_preprocessed, (255, 0, 0))
-    image_preprocessed = draw_edges(links, edge_dictionary, image_preprocessed, (0, 255, 0))
-    # rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
-    image_preprocessed = draw_edges(rest, edge_dictionary, image_preprocessed, (0, 0, 255))
-    time_print('SAVED: ./' + file_name + '/overlayed_classifications_' + score_type + '.png')
-    cv2.imwrite('./' + file_name + '/overlayed_classifications_' + score_type + '.png', image_preprocessed)
+    return bridges, links, rest, edge_dictionary
 
 
 # ---------------------------------------------------------------------------------
@@ -924,7 +994,7 @@ def execute(input_path):
 
         # pre-process image
         time_print('pre-process image...')
-        image_preprocessed = pre_process(input_path + image, file_name)
+        image_view, image_preprocessed = pre_process(input_path + image, file_name)
         # create dir for results
 
         # extract ridges
@@ -958,9 +1028,7 @@ def execute(input_path):
         #   choose the assignment with minimum value for u,v,w - for all junctions for every combination
         # TODO step 1: for each u,v v,w1 v,w2 JUNCTION -> calculate 3 scores: L L B, L B L, L L B distance from T
         # TODO step 1: for each vertex V, calculate minimum l_score
-        image_preprocessed[image_preprocessed == 1] = 2
-        image_preprocessed[image_preprocessed == 0] = 1
-        image_preprocessed[image_preprocessed == 2] = 0
+
         # calculate t_scores for v
         t_scores = calculate_junctions_t_scores(edge_dictionary, excluded)
         # calculate l_scores for v
@@ -968,8 +1036,12 @@ def execute(input_path):
         # classify using both t_scores and l_scores for v
         v_scores = create_v_scores(t_scores, l_scores)
 
-        greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 'v_scores')
-        greedy_classification(t_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 't_scores')
+        bridges, links, rest, edge_dictionary = greedy_classification(v_scores, edge_dictionary, skeleton, file_name,
+                                                                      'v_scores')
+        overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
+        bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
+                                                                      't_scores')
+        overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
 
         # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
         #
@@ -1030,7 +1102,7 @@ def process_image_parallel(image_data, len_images, input_path):
 
     # pre-process image
     time_print('pre-process image...')
-    image_preprocessed = pre_process(input_path + image, file_name)
+    image_view, image_preprocessed = pre_process(input_path + image, file_name)
     # create dir for results
     # extract ridges
     time_print('extract ridges, junctions...')
@@ -1045,9 +1117,13 @@ def process_image_parallel(image_data, len_images, input_path):
     l_scores = calculate_junctions_l_scores(edge_dictionary, graph_vertexes, excluded)
     # classify using both t_scores and l_scores for v
     v_scores = create_v_scores(t_scores, l_scores)
-    greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 'v_scores')
-    greedy_classification(v_scores, edge_dictionary, skeleton, file_name, image_preprocessed * 255, 't_scores')
 
+    bridges, links, rest, edge_dictionary = greedy_classification(v_scores, edge_dictionary, skeleton, file_name,
+                                                                  'v_scores')
+    overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
+    bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
+                                                                  't_scores')
+    overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
 
     return i
 
@@ -1058,7 +1134,7 @@ def execute_parallel(input_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=30)
+    pool = ProcessPoolExecutor(max_workers=3)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     for f in futures.as_completed(wait_for):
@@ -1067,5 +1143,6 @@ def execute_parallel(input_path):
 
 if __name__ == "__main__":
         # execute_parallel("./data/original/")
+        # execute_parallel("./data/")
         execute("./data/")
 
