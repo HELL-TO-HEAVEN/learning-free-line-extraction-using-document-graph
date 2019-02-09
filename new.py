@@ -30,6 +30,8 @@ def draw_edges(edges, edge_dictionary, image, color):
     return image
 
 
+# ---------------------------------------------------------------------------------
+# auxiliary function to overlay edges on original image
 def overlay_edges(image, edge_list, color=None):
     image_copy = copy.deepcopy(image)
 
@@ -50,25 +52,37 @@ def overlay_edges(image, edge_list, color=None):
 
 
 # ---------------------------------------------------------------------------------
+# get humanly distinguishable colors
+def get_spaced_colors(n):
+    max_value = 255**3
+    min_value = 100**3
+    interval = int(max_value / n)
+    colors = [hex(I)[2:].zfill(6) for I in range(min_value, max_value, interval)]
+    return [(int(i[:2], 16), int(i[2:4], 16), int(i[4:], 16)) for i in colors]
+
+
+# ---------------------------------------------------------------------------------
 # draw_graph_edges
-def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False):
-    after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False, overlay=False):
+    if overlay:
+        after_ridge_mask = ridges_mask
+    else:
+        after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+
+    random_colors = get_spaced_colors(len(edge_dictionary.values()) * 2)
+    i = 0
     for edge_list in edge_dictionary.values():
-        colors = []
-        random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
-        while random_color in colors:
-            random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
-        after_ridge_mask = overlay_edges(after_ridge_mask, edge_list, random_color)
-        colors.append(random_color)
+        after_ridge_mask = overlay_edges(after_ridge_mask, edge_list, random_colors[i])
+        i += 1
     for two_vertex in edge_dictionary.keys():
         v1, v2 = two_vertex
         after_ridge_mask[v1] = (255, 255, 255)
         after_ridge_mask[v2] = (255, 255, 255)
 
-    # cv2.namedWindow(window_name)
-    # cv2.imshow(window_name, after_ridge_mask)
-    # cv2.imwrite(window_name + '.png', after_ridge_mask)
+    cv2.imwrite('./' + window_name + '/final_result' + '.png', after_ridge_mask)
     if wait_flag:
+        cv2.namedWindow(window_name)
+        cv2.imshow(window_name, after_ridge_mask)
         cv2.waitKey()
         cv2.destroyAllWindows()
 
@@ -270,7 +284,7 @@ def time_print(msg):
     print('[' + str(datetime.datetime.now()) + ']', msg)
 
 
-# -
+# ---------------------------------------------------------------------------------
 # All vertexes with one degree (take part of one edge only) - they are removed
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # if three edges create a three edged circle: (u,v) (v,w) (w,u), we remove (w,u)
@@ -482,7 +496,6 @@ def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
         for point in pixel_list:
             skel[point] = True
 
-
     # create result image after iteration is done and store to image for illustration
     colors = []
     image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
@@ -555,6 +568,7 @@ def ridge_extraction(image_preprocessed, file_name):
     results = []
     iter_index = 0
     time_print('pruning redundant edges and circles...')
+    excluded = []
     while changed:
         time_print('iter ' + str(iter_index))
         skeleton, results, excluded, changed = prune_graph(skeleton, iter_index, file_name)
@@ -586,6 +600,35 @@ def ridge_extraction(image_preprocessed, file_name):
     graph_vertexes = list(set([tuple(val) for sublist in edge_dictionary.keys() for val in sublist]))
 
     return skeleton, edge_dictionary, graph_vertexes, excluded
+
+
+# -
+#
+def calculate_abs_angle_difference(u, v, w):
+    def find_min_angle(p_u, p_v):
+        # \__ u,v v,w1
+        x_w_1 = p_v[0] + np.abs(p_v[0] - p_u[0])
+        y_w_1 = p_v[1]
+        angle_1 = calculate_abs_angle(p_u, p_v, (x_w_1, y_w_1))
+        # _\ w2,v v,u
+        x_w_2 = p_v[0] - np.abs(p_v[0] - p_u[0])
+        y_w_2 = p_v[1]
+        angle_2 = calculate_abs_angle(p_u, p_v, (x_w_2, y_w_2))
+        # \ u,v
+        #  | v,w2
+        x_w_3 = p_v[0]
+        y_w_3 = p_v[1] + np.abs(p_v[1] - p_u[1])
+        angle_3 = calculate_abs_angle(p_u, p_v, (x_w_3, y_w_3))
+        # \| u,v v,w3
+        x_w_4 = p_v[0]
+        y_w_4 = p_v[1] - np.abs(p_v[1] - p_u[1])
+        angle_4 = calculate_abs_angle(p_u, p_v, (x_w_4, y_w_4))
+
+        return np.min([angle_1, angle_2, angle_3, angle_4])
+    before = calculate_abs_angle(u, v, w)
+    after = np.abs(find_min_angle(u, v) - find_min_angle(v, w))
+    print('before=', before, 'after=', after)
+    return np.pi - after
 
 
 # ---------------------------------------------------------------------------------
@@ -865,6 +908,7 @@ def overlay_and_save(bridges, links, rest, edge_dictionary, image_preprocessed, 
     image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
     time_print('SAVED: ./' + file_name + '/overlayed_classifications_' + score_type + '.png')
     cv2.imwrite('./' + file_name + '/overlayed_classifications_' + score_type + '.png', image)
+    return image
 
 
 # ---------------------------------------------------------------------------------
@@ -882,6 +926,7 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
     bridges = set()
     links = set()
     time_print('greedy manner labeling ...')
+
     index = 1
     time_print('start=' + str(len(t_scores)))
     while t_scores:
@@ -934,9 +979,18 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
     image = cv2.cvtColor(np.zeros_like(skeleton), cv2.COLOR_GRAY2RGB)
     image = draw_edges(bridges, edge_dictionary, image, (255, 0, 0))
     image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
-    rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
-    image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
 
+    # find anchor edges
+    anchors = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
+
+    # find edges connected to anchor points as conflict
+    for bridge in bridges:
+        for coord in [coord for edge in anchors for coord in edge]:
+            if coord in bridge:
+                links.add(bridge)
+                break
+
+    image = draw_edges(anchors, edge_dictionary, image, (0, 0, 255))
     cv2.imwrite('./' + file_name + '/classifications_' + score_type + '.png', image)
 
     # cv2.namedWindow('after')
@@ -945,7 +999,7 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
     # cv2.imshow('r', image_preprocessed)
     # cv2.waitKey()
     # cv2.destroyAllWindows()
-    return bridges, links, rest, edge_dictionary
+    return bridges, links, anchors, edge_dictionary
 
 
 # ---------------------------------------------------------------------------------
@@ -975,6 +1029,92 @@ def create_v_scores(t_scores, l_scores):
         v_scores[t_score] = v_score
 
     return v_scores
+
+
+# ---------------------------------------------------------------------------------
+#
+def combine_edges(bridges, links, rest, edge_dictionary, image_unmodified):
+    def merge_group(candidate_links, edge_dict, adj_list, anchors, threshold=False):
+        # we combine two links as one if angle between them is minimum
+        done = False
+        while not done:
+            done = True
+            merge_link_1 = []
+            merge_link_2 = []
+            merge_angles = 0
+            for link in candidate_links:
+                u, v = link
+                # print('link=', link)
+                neighbors = [l for l in candidate_links if v in l and u not in l]
+                real_neighbors = [e if e not in adj_list.keys() else adj_list[e] for e in neighbors]
+                # print('neighbors=', neighbors)
+                if real_neighbors:
+                    angles = [calculate_abs_angle(u, v, e[0] if e[1] == v else e[1]) for e in real_neighbors]
+                    # print('angles=', angles)
+                    max_index = np.argmax(angles)
+                    max_neighbor = real_neighbors[max_index]
+                    if angles[max_index] > merge_angles:
+                        merge_angles = angles[max_index]
+                        merge_link_1 = link
+                        merge_link_2 = max_neighbor
+                # print('------------------------')
+
+            # if we reached anchor points we do not merge them. we stop.
+            found = False
+            for coord in [coord for edge in anchors for coord in edge]:
+                if coord in merge_link_1 and coord in merge_link_2:
+                    found = True
+            if found:
+                continue
+
+            # now we merge 'best' candidates together modifying the document graph
+            if merge_link_1 and (threshold or np.abs(np.pi - merge_angles) < np.pi / 3):
+                print('link_1=', merge_link_1, 'link_2=', merge_link_2, 'angle=', merge_angles)
+                done = False
+                pixels_1 = edge_dict.pop(merge_link_1)
+                pixels_2 = edge_dict.pop(merge_link_2)
+                candidate_links = [e for e in candidate_links if e != merge_link_1 and e != merge_link_2]
+                # print('pixels_1=', pixels_1)
+                # print('pixels_2=', pixels_2)
+
+                new_edge = (merge_link_1[0], merge_link_2[0] if merge_link_2[0] != merge_link_1[1] else merge_link_2[1])
+                # TODO IN CASE NOT IN ADJ LIST:
+                n_u, n_w = new_edge
+                # find u, v , w
+                # set v as adjacent for u and for w (2 entries)
+                # TODO IN CASE IN ADJ LIST:
+                # UPDATE ADJ LIST TO NEW ADJACENCY
+                # if u not in adj_list.keys():
+
+                new_pixels = list(set([*pixels_1, *pixels_2]))
+                # print('new_pixels=', new_pixels)
+
+                edge_dict[new_edge] = new_pixels
+                candidate_links.append(new_edge)
+
+                # print('------------------------')
+                # print(len(pixels_1), len(pixels_2), len(new_pixels))
+                # print('------------------------')
+        return candidate_links, edge_dict, adj_list
+
+    time_print('combining graph edges ... links')
+    # draw_graph_edges(edge_dictionary, res, 'before', wait_flag=False, overlay=True)
+
+    can_be_both = [e for e in links if e in bridges]
+    # bridges = [e for e in bridges if e not in can_be_both]
+    definite_links = [e for e in links if e not in bridges]
+    adjacency_list = dict()
+
+    definite_links, edge_dictionary, adjacency_list = merge_group(definite_links, edge_dictionary, adjacency_list, rest)
+    both = definite_links + can_be_both
+    # print('--------------------------------------------------------')
+    both, edge_dictionary, adjacency_list = merge_group(both, edge_dictionary, adjacency_list, rest, threshold=True)
+    # print('--------------------------------------------------------')
+    # res = overlay_and_save(bridges, both, rest, edge_dictionary, image_unmodified, 'classified', 'v_scores')
+    # cv2.imwrite('classified.png', res)
+    # res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    # draw_graph_edges(edge_dictionary, res, 'final_result', wait_flag=False, overlay=True)
+    return edge_dictionary
 
 
 # ---------------------------------------------------------------------------------
@@ -1041,7 +1181,13 @@ def execute(input_path):
         overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
         bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
                                                                       't_scores')
-        overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
+        combined_graph = combine_edges(bridges, links, rest, edge_dictionary, image_view)
+        image = 1 - image_view
+        image *= 255
+        res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True)
+
+        # overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
 
         # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
         #
@@ -1124,6 +1270,13 @@ def process_image_parallel(image_data, len_images, input_path):
     bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
                                                                   't_scores')
     overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
+
+    combined_graph = combine_edges(bridges,links, rest, edge_dictionary, image_view)
+    image = 1 - image_view
+    image *= 255
+    res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True)
+
 
     return i
 
