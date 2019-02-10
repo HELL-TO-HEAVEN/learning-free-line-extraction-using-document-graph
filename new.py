@@ -55,7 +55,7 @@ def overlay_edges(image, edge_list, color=None):
 # get humanly distinguishable colors
 def get_spaced_colors(n):
     max_value = 255**3
-    min_value = 100**3
+    min_value = 150**3
     interval = int(max_value / n)
     colors = [hex(I)[2:].zfill(6) for I in range(min_value, max_value, interval)]
     return [(int(i[:2], 16), int(i[2:4], 16), int(i[4:], 16)) for i in colors]
@@ -79,19 +79,23 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
         after_ridge_mask[v1] = (255, 255, 255)
         after_ridge_mask[v2] = (255, 255, 255)
 
-    cv2.imwrite('./' + window_name + '/final_result' + '.png', after_ridge_mask)
+    time_print('SAVED: ./' + window_name + '/final_result.png')
+    cv2.imwrite('./' + window_name + '/final_result.png', after_ridge_mask)
+    cv2.imwrite('./' + window_name + '/final_result_inverted.png', 255 - after_ridge_mask)
     if wait_flag:
         cv2.namedWindow(window_name)
         cv2.imshow(window_name, after_ridge_mask)
         cv2.waitKey()
         cv2.destroyAllWindows()
 
+    return after_ridge_mask
+
 
 # ---------------------------------------------------------------------------------
 # document pre processing
 def pre_process(path, file_name):
     def cluster_elements(all_stats):
-        n_clusters = 11
+        n_clusters = 9
         data_list = [stat[5] for stat in all_stats]
         # print('data_list=', data_list)
         data = np.asarray(data_list).reshape(-1, 1)
@@ -114,11 +118,13 @@ def pre_process(path, file_name):
 
     image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     cv2.imwrite('./' + file_name + '/original_image.png', image)
+    cv2.imwrite('./' + file_name + '/original_image_inverted.png', 255 - image)
     # image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=3)
     # cv2.imwrite('./' + file_name + '/dilated_image.png', image)
     # using gaussian adaptive thresholding
     image = cv2.adaptiveThreshold(image, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 255, 9)
     cv2.imwrite('./' + file_name + '/gaus.png', image * 255)
+    cv2.imwrite('./' + file_name + '/gaus_inverted.png', 255 - image * 255)
     # convert to binary using otsu binarization
     # image = cv2.threshold(image, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
     # remove small connected components - aim for smallest 10% and in an increasing step until 2x size
@@ -166,7 +172,11 @@ def pre_process(path, file_name):
     black_border_added_no_tiny_elements = 1 - black_border_added_no_tiny_elements
 
     cv2.imwrite('./' + file_name + '/preprocessed_image.png', black_border_added * 255)
+    cv2.imwrite('./' + file_name + '/preprocessed_image_inverted.png', 255 - black_border_added * 255)
+
     cv2.imwrite('./' + file_name + '/preprocessed_image_no_tiny_elements.png', black_border_added_no_tiny_elements * 255)
+    cv2.imwrite('./' + file_name + '/preprocessed_image_no_tiny_elements_inverted.png',
+                255 - black_border_added_no_tiny_elements * 255)
 
     return black_border_added, black_border_added_no_tiny_elements
 
@@ -313,6 +323,7 @@ def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
         return e1[0] == e2[0] and e1[1] == e2[1]
 
     cv2.imwrite('./' + file_name + '/skel_' + str(iter_index) + '.png', skeleton.astype(np.uint8) * 255)
+    cv2.imwrite('./' + file_name + '/skel_' + str(iter_index) + '_inverted.png', 255 - skeleton.astype(np.uint8) * 255)
     # important! removes pixels due to vertex removal from previous iteration
     skeleton = morphology.skeletonize(skeleton)
     # TODO add to paper information about this !!! remove redundant edges
@@ -508,6 +519,7 @@ def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
             image[point] = random_color
         colors.append(random_color)
     cv2.imwrite('./' + file_name + '/iter_' + str(iter_index) + '.png', image)
+    cv2.imwrite('./' + file_name + '/iter_' + str(iter_index) + '_inverted.png', 255 - image)
     return skel, results, excluded, try_again
 
 
@@ -520,6 +532,7 @@ def ridge_extraction(image_preprocessed, file_name):
     # normalize distance transform to be of values [0,1]
     normalized_dist_transform = cv2.normalize(dist_transform, None, 0, 1.0, cv2.NORM_MINMAX)
     cv2.imwrite('./' + file_name + '/normalized_dist_transform.png', normalized_dist_transform * 255)
+    cv2.imwrite('./' + file_name + '/normalized_dist_transform_inverted.png', 255 - normalized_dist_transform * 255)
     # extract local maxima pixels -- "ridge pixels"
     dist_maxima_mask = calculate_local_maxima_mask(normalized_dist_transform)
     # retrieve the biggest connected component only
@@ -563,7 +576,8 @@ def ridge_extraction(image_preprocessed, file_name):
     # TODO THEN WE EXTRACT THE EDGES - USING BFS ?! NEED TO FIND A GOOD WAY
 
     # print('file_name=', file_name)
-    cv2.imwrite('./' + file_name + '/skeleton.png', dist_maxima_mask_biggest_component.astype(np.uint8) * 255)
+    cv2.imwrite('./' + file_name + '/skeleton_original.png', dist_maxima_mask_biggest_component.astype(np.uint8) * 255)
+    cv2.imwrite('./' + file_name + '/skeleton_original_inverted.png', 255 - dist_maxima_mask_biggest_component.astype(np.uint8) * 255)
     changed = True
     results = []
     iter_index = 0
@@ -589,7 +603,8 @@ def ridge_extraction(image_preprocessed, file_name):
         for point in edge_list:
             image[point] = random_color
         colors.append(random_color)
-    cv2.imwrite('./' + file_name + '/edges.png', image)
+    cv2.imwrite('./' + file_name + '/skeleton_pruned.png', image)
+    cv2.imwrite('./' + file_name + '/skeleton_pruned_inverted.png', 255 - image)
 
     # cv2.namedWindow('resultFinal')
     # cv2.imshow('resultFinal', image)
@@ -890,8 +905,9 @@ def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7
         # print(junction_l_scores)
         # min_junction = junctions[np.argmin(l_scores)]
         # print('min junction=', min_junction, 'min score=', min_score)
-        min_score = np.min(l_scores)
-        vertexes_l_scores[vertex] = min_score
+        if l_scores:  # TODO why would this happen
+            min_score = np.min(l_scores)
+            vertexes_l_scores[vertex] = min_score
     # print(vertexes_l_scores)
     return vertexes_l_scores
 
@@ -906,8 +922,8 @@ def overlay_and_save(bridges, links, rest, edge_dictionary, image_preprocessed, 
     image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
     # rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
     image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
-    time_print('SAVED: ./' + file_name + '/overlayed_classifications_' + score_type + '.png')
     cv2.imwrite('./' + file_name + '/overlayed_classifications_' + score_type + '.png', image)
+
     return image
 
 
@@ -975,23 +991,25 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
         # print('B=', bridges, 'L=', links)
     print()
     skeleton = skeleton.astype(np.uint8)
-    # draw_graph_edges(edge_dictionary, skeleton, 'before')
-    image = cv2.cvtColor(np.zeros_like(skeleton), cv2.COLOR_GRAY2RGB)
-    image = draw_edges(bridges, edge_dictionary, image, (255, 0, 0))
-    image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
 
     # find anchor edges
     anchors = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
 
-    # find edges connected to anchor points as conflict
+    # mark edges connected to anchor points as conflict edges
     for bridge in bridges:
         for coord in [coord for edge in anchors for coord in edge]:
             if coord in bridge:
                 links.add(bridge)
                 break
 
+    # draw_graph_edges(edge_dictionary, skeleton, 'before')
+    image = cv2.cvtColor(np.zeros_like(skeleton), cv2.COLOR_GRAY2RGB)
+    image = draw_edges(bridges, edge_dictionary, image, (255, 0, 0))
+    image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
     image = draw_edges(anchors, edge_dictionary, image, (0, 0, 255))
+
     cv2.imwrite('./' + file_name + '/classifications_' + score_type + '.png', image)
+    cv2.imwrite('./' + file_name + '/classifications_' + score_type + '_inverted.png', 255 - image)
 
     # cv2.namedWindow('after')
     # cv2.imshow('after', image)
@@ -1033,8 +1051,8 @@ def create_v_scores(t_scores, l_scores):
 
 # ---------------------------------------------------------------------------------
 #
-def combine_edges(bridges, links, rest, edge_dictionary, image_unmodified):
-    def merge_group(candidate_links, edge_dict, adj_list, anchors, threshold=False):
+def combine_edges(bridges, links, rest, edge_dictionary):
+    def merge_group(candidate_links, edge_dict, adj_list, anchors, threshold=np.pi / 2.5):
         # we combine two links as one if angle between them is minimum
         done = False
         while not done:
@@ -1068,8 +1086,8 @@ def combine_edges(bridges, links, rest, edge_dictionary, image_unmodified):
                 continue
 
             # now we merge 'best' candidates together modifying the document graph
-            if merge_link_1 and (threshold or np.abs(np.pi - merge_angles) < np.pi / 3):
-                print('link_1=', merge_link_1, 'link_2=', merge_link_2, 'angle=', merge_angles)
+            if merge_link_1 and np.abs(np.pi - merge_angles) < threshold:
+                # print('link_1=', merge_link_1, 'link_2=', merge_link_2, 'angle=', merge_angles)
                 done = False
                 pixels_1 = edge_dict.pop(merge_link_1)
                 pixels_2 = edge_dict.pop(merge_link_2)
@@ -1097,7 +1115,7 @@ def combine_edges(bridges, links, rest, edge_dictionary, image_unmodified):
                 # print('------------------------')
         return candidate_links, edge_dict, adj_list
 
-    time_print('combining graph edges ... links')
+    time_print('combining graph edges ...')
     # draw_graph_edges(edge_dictionary, res, 'before', wait_flag=False, overlay=True)
 
     can_be_both = [e for e in links if e in bridges]
@@ -1105,15 +1123,28 @@ def combine_edges(bridges, links, rest, edge_dictionary, image_unmodified):
     definite_links = [e for e in links if e not in bridges]
     adjacency_list = dict()
 
+    # remove bridges from graph that are not marked as conflict
+    only_bridges = [bridge for bridge in bridges if bridge not in can_be_both]
+    for bridge in only_bridges:
+        edge_dictionary.pop(bridge)
+
+    # combine edges - first iteration for link edges
     definite_links, edge_dictionary, adjacency_list = merge_group(definite_links, edge_dictionary, adjacency_list, rest)
     both = definite_links + can_be_both
-    # print('--------------------------------------------------------')
-    both, edge_dictionary, adjacency_list = merge_group(both, edge_dictionary, adjacency_list, rest, threshold=True)
-    # print('--------------------------------------------------------')
+    # combine edges - second iteration, now we include conflict edges
+    both, edge_dictionary, adjacency_list = merge_group(both, edge_dictionary, adjacency_list, rest,
+                                                        threshold=np.pi / 4.0)
+
     # res = overlay_and_save(bridges, both, rest, edge_dictionary, image_unmodified, 'classified', 'v_scores')
     # cv2.imwrite('classified.png', res)
     # res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     # draw_graph_edges(edge_dictionary, res, 'final_result', wait_flag=False, overlay=True)
+
+    # remove bridges from document graph that were not used in conflict stage
+    only_bridges = [bridge for bridge in bridges if bridge in edge_dictionary.keys()]
+    for bridge in only_bridges:
+        edge_dictionary.pop(bridge)
+
     return edge_dictionary
 
 
@@ -1142,36 +1173,9 @@ def execute(input_path):
         # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
         skeleton, edge_dictionary, vertexes, excluded = ridge_extraction(image_preprocessed, file_name)
 
-        # mark junction pixels
-        # time_print('mark junction pixels...')
-        # junction_pixels_mask = mark_junction_pixels(ridges_mask)
-        # cv2.imwrite('junction_pixels_mask.png', overlay_images(ridges_mask*255, junction_pixels_mask*255))
-        # retrieve vertex pixels
-        # time_print('retrieve vertex pixels...')
-        # vertexes_dictionary, vertexes_list, labels, vertex_mask = get_vertexes(ridges_matrix, junction_pixels_mask)
-        # save_image_like(ridges_mask, vertexes_list, 'vertex_mask')
-        # retrieve edges between two vertexes
-        # each edge value is a list of pixels from vertex u to vertex v
-        # each edge key is a pair of vertexes (u, v)
-        # time_print('retrieve edges between two vertexes...')
-        # edge_dictionary = get_edges_between_vertexes(edges, degrees)
-        # edge_dictionary = get_edges(ridges_mask, junction_pixels_mask, vertexes_list)
-        # time_print('clean graph up...')
-        # edge_dictionary = clean_graph(edge_dictionary, ridges_mask)
-        # using each two vertexes of an edge, we classify whether an edge is a brige (between two lines),
-        # or a link (part of a line). As a result, we receive a list of edges and their classification
-        # time_print('classify edges...')
-        # edge_scores = classify_edges(edge_dictionary, ridges_mask)
-        # TODO ...
-        # calculate for each junction its B L L, L B L, L L B values using distance from T shape
-        # in greedy manner -
-        #   choose the assignment with minimum value for u,v,w - for all junctions for every combination
-        # TODO step 1: for each u,v v,w1 v,w2 JUNCTION -> calculate 3 scores: L L B, L B L, L L B distance from T
-        # TODO step 1: for each vertex V, calculate minimum l_score
-
-        # calculate t_scores for v
+        # calculate T_scores for V
         t_scores = calculate_junctions_t_scores(edge_dictionary, excluded)
-        # calculate l_scores for v
+        # calculate l_scores for V
         l_scores = calculate_junctions_l_scores(edge_dictionary, vertexes, excluded)
         # classify using both t_scores and l_scores for v
         v_scores = create_v_scores(t_scores, l_scores)
@@ -1181,60 +1185,35 @@ def execute(input_path):
         overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
         bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
                                                                       't_scores')
-        combined_graph = combine_edges(bridges, links, rest, edge_dictionary, image_view)
+        combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
+
+        print('finding vertexes with degree 2 ...')
+        done = False
+        while not done:
+            all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
+            vertexes = list(set(all_vertexes))
+            done = True
+            for vertex in vertexes:
+                two_links = [link for link in combined_graph.keys() if vertex in link]
+                if len(two_links) == 2:
+                    pixels_1 = combined_graph.pop(two_links[0])
+                    pixels_2 = combined_graph.pop(two_links[1])
+                    new_edge = (two_links[0][0], two_links[1][0] if two_links[1][0] != two_links[0][1] else two_links[1][1])
+                    combined_graph[new_edge] = pixels_1 + pixels_2
+                    done = False
+                    break
+
         image = 1 - image_view
         image *= 255
         res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
         draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True)
 
-        # overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
+        # result = draw_graph_edges(combined_graph, cv2.cvtColor(res, cv2.COLOR_RGB2GRAY), file_name, wait_flag=False,
+        # overlay=False)
+        # result = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+        # result[result != 0] = 1
 
-        # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
-        #
-        # TODO step 3: some options (depending on result in step 2)
-        #       TODO 3.1: for each edge that has no agreement we try to improve by choosing one of the two
-
-        # TODO current work . . . combine edges
-        # time_print('calculate vertex T-scores...')
-        # calculate_junction_t_distances(vertexes_list, edge_dictionary, ridges_mask)
-        # combined_edge_dictionary = combine_edges(vertexes_list, edge_dictionary, ridges_mask)
-        # after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
-        # for edge_list in combined_edge_dictionary.values():
-        #    colors = []
-        #    random_color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
-        #    while random_color in colors:
-        #        random_color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
-        #    after_ridge_mask = overlay_edges(after_ridge_mask, edge_list, random_color)
-        #    colors.append(random_color)
-        # cv2.imwrite(file_name + '_result.png', after_ridge_mask)
-        # cv2.namedWindow('before')
-        # cv2.namedWindow('after')
-        # cv2.imshow('before', before_ridge_mask)
-        # cv2.imshow('after', after_ridge_mask)
-        # cv2.waitKey()
-        # cv2.destroyAllWindows()
-
-        # classified_image = overlay_classified_edges(image_preprocessed, edge_dictionary, edge_scores)
-        # time_print('combine link edges...')
-
-        # cv2.imshow('overlay_classified_edges', classified_image)
-        # cv2.imwrite(input_path + '/results/' + file_name + '_result.png', classified_image)
-        # save the graph in a file
-        # with open(input_path + '/results/' + file_name + '_graph.pkl', 'wb') as handle:
-        #     pickle.dump(edge_dictionary, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        # save classifications of each edge in a file
-        # with open(input_path + '/results/' + file_name + '_scores.pkl', 'wb') as handle:
-        #     pickle.dump(edge_scores, handle, protocol=pickle.HIGHEST_PROTOCOL)
         i += 1
-        # cv2.waitKey()
-        # cv2.destroyAllWindows()
-
-        # display
-        # overlay_image = overlay_images(ridges_mask * 255, vertex_mask * 255, vertexes_list)
-        # cv2.imwrite('overlay_image.png', overlay_image)
-        # cv2.imshow('overlay_image', overlay_image)
-        # cv2.waitKey()
-        # cv2.destroyAllWindows()
 
 
 def process_image_parallel(image_data, len_images, input_path):
@@ -1271,7 +1250,7 @@ def process_image_parallel(image_data, len_images, input_path):
                                                                   't_scores')
     overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
 
-    combined_graph = combine_edges(bridges,links, rest, edge_dictionary, image_view)
+    combined_graph = combine_edges(bridges,links, rest, edge_dictionary)
     image = 1 - image_view
     image *= 255
     res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
