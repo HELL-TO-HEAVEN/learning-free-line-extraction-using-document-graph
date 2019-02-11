@@ -63,7 +63,7 @@ def get_spaced_colors(n):
 
 # ---------------------------------------------------------------------------------
 # draw_graph_edges
-def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False, overlay=False):
+def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False, overlay=False, image_offset_values=None):
     if overlay:
         after_ridge_mask = ridges_mask
     else:
@@ -72,10 +72,16 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
     random_colors = get_spaced_colors(len(edge_dictionary.values()) * 2)
     i = 0
     for edge_list in edge_dictionary.values():
-        after_ridge_mask = overlay_edges(after_ridge_mask, edge_list, random_colors[i])
+        if image_offset_values is not None:
+            offset_edge_list = [(e[0]+image_offset_values[0], e[1]+image_offset_values[1]) for e
+                                in edge_list]
+        after_ridge_mask = overlay_edges(after_ridge_mask, offset_edge_list, random_colors[i])
         i += 1
     for two_vertex in edge_dictionary.keys():
         v1, v2 = two_vertex
+        if image_offset_values is not None:
+            v1 = (v1[0] + image_offset_values[0], v1[1] + image_offset_values[1])
+            v2 = (v2[0] + image_offset_values[0], v2[1] + image_offset_values[1])
         after_ridge_mask[v1] = (255, 255, 255)
         after_ridge_mask[v2] = (255, 255, 255)
 
@@ -95,7 +101,8 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
 # document pre processing
 def pre_process(path, file_name):
     def cluster_elements(all_stats):
-        n_clusters = 9
+        max_cluster_size = 0.15
+        n_clusters = 11
         data_list = [stat[5] for stat in all_stats]
         # print('data_list=', data_list)
         data = np.asarray(data_list).reshape(-1, 1)
@@ -104,15 +111,18 @@ def pre_process(path, file_name):
         y_k_means = k_means.predict(data)
 
         cluster_size = [len(list(filter(lambda x: x == i, y_k_means))) for i in range(n_clusters)]
-        # print('cluster_size=', cluster_size)
-        # print('y_k_means=', list(y_k_means))
+        total = sum(cluster_size)
+
         cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), data_list), 0)
                          for i in range(n_clusters)]
-        minimum_cluster = np.argmin([x[1]/x[0] for x in zip(cluster_size, cluster_total)])
-        # print('cluster_total=', cluster_total)
-        # print('min_cluster=', minimum_cluster)
-        # exit()
-        return y_k_means, minimum_cluster
+        minimum_cluster = np.argmin([c[1]/c[0] for c in zip(cluster_size, cluster_total)])
+        minimum_cluster_size = cluster_size.count(minimum_cluster)
+        # THIS IS A THRESHOLD
+        # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
+        if minimum_cluster_size / total < max_cluster_size:
+                return y_k_means, minimum_cluster
+        else:
+            return y_k_means, None
 
     # load image as gray-scale,
 
@@ -122,28 +132,36 @@ def pre_process(path, file_name):
     # image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=3)
     # cv2.imwrite('./' + file_name + '/dilated_image.png', image)
     # using gaussian adaptive thresholding
-    image = cv2.adaptiveThreshold(image, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 255, 9)
-    cv2.imwrite('./' + file_name + '/gaus.png', image * 255)
-    cv2.imwrite('./' + file_name + '/gaus_inverted.png', 255 - image * 255)
+    # image = cv2.adaptiveThreshold(image, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 255, 9)
+    image = cv2.threshold(image, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    image = 1 - image
+    cv2.imwrite('./' + file_name + '/otsu.png', image * 255)
+    cv2.imwrite('./' + file_name + '/otsu_inverted.png', 255 - image * 255)
     # convert to binary using otsu binarization
     # image = cv2.threshold(image, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-    # remove small connected components - aim for smallest 10% and in an increasing step until 2x size
+
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=8, ltype=cv2.CV_32S)
     stats = np.asarray([np.append(stat[0], stat[1]) for stat in zip(range(num_labels), stats)])
 
+    # removing small artifacts and diactrics, using k-means
     results, min_cluster = cluster_elements(stats)
-    index = 0
-    time_print('elements to be deleted: ' + str(np.count_nonzero(results == 0)))
-    for clustered in results:
-        if clustered == min_cluster:
-            # print('deleted:', index, 'size=', stats[index, 5])
-            labels[labels == index] = 0
-        index += 1
+    if min_cluster is not None:
+        index = 0
+        time_print('elements to be deleted: ' + str(np.count_nonzero(results == 0)))
+        for clustered in results:
+            if clustered == min_cluster:
+                # print('deleted:', index, 'size=', stats[index, 5])
+                labels[labels == index] = 0
+            index += 1
 
-    labels[labels != 0] = 1
-    # cv2.namedWindow('image')
-    # cv2.imshow('image', image * 255)
-    image_no_tiny_elements = op.and_(image, labels.astype(np.uint8))
+        labels[labels != 0] = 1
+        # cv2.namedWindow('image')
+        # cv2.imshow('image', image * 255)
+        image_no_tiny_elements = op.and_(image, labels.astype(np.uint8))
+        cv2.imwrite('./' + file_name + '/image_no_tiny_elements.png', image_no_tiny_elements * 255)
+    else:
+        time_print('NO ELEMENTS to be deleted: MIN CLUSTER SIZE =' + str(np.count_nonzero(results == 0)))
+        image_no_tiny_elements = image
     # invert colors
     # image_no_tiny_elements = 1 - image_no_tiny_elements
     # image = 1 - image
@@ -163,10 +181,29 @@ def pre_process(path, file_name):
     white_border_added_image = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 0)
     white_border_added_image_no_tiny_elements = cv2.copyMakeBorder(image_no_tiny_elements, 29, 29, 29, 29,
                                                                    cv2.BORDER_CONSTANT, None, 0)
+
+    # add bounding box at distance 20 of black color around the complete text
+    # cv2.findNonZero(white_border_added_image, white_border_added_image)
+    x, y, w, h = cv2.boundingRect(white_border_added_image_no_tiny_elements)
+    cv2.rectangle(white_border_added_image, (x - 20, y - 20), (x + w + 20, y + h + 20), 1)
+    cv2.rectangle(white_border_added_image_no_tiny_elements, (x - 20, y - 20), (x + w + 20, y + h + 20), 1)
+
+    # TODO ANCHORS THAT ARE EDGE OF IMAGE - DUE TO THIS METHOD WE DONT DO THAT INSTEAD WE GIVE RECTANGLE CORNERS
+    # excludes = [(0, 0), (skeleton.shape[1], 0), (0, skeleton.shape[0]), (skeleton.shape[1], skeleton.shape[0])]
+    # these are the 4 anchors for the text found in the original image
+    # anchors = [(x - 20, y - 20), (x + w + 20, y - 20), (x - 20, y + h + 20), (x + w + 20, y + h + 20)]
+    # here we take ROI as the image
+    white_border_added_image_no_tiny_elements = white_border_added_image_no_tiny_elements[y - 20: y + h + 20, x - 20: x + w + 20]
+    # change anchors to 4 corners
+    anchors = [(0, 0), (white_border_added_image_no_tiny_elements.shape[1], 0),
+               (0, white_border_added_image_no_tiny_elements.shape[0]),
+               (white_border_added_image_no_tiny_elements.shape[1], white_border_added_image_no_tiny_elements.shape[0])]
+    image_offset_values = (y - 20, x - 20)
+    # print('ancors=', anchors)
     # on top of that add black border of size 1
     black_border_added = cv2.copyMakeBorder(white_border_added_image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
     black_border_added_no_tiny_elements = cv2.copyMakeBorder(white_border_added_image_no_tiny_elements,
-                                                             1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
+                                                                 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
     # invert images (now black is black and white is white)
     black_border_added = 1 - black_border_added
     black_border_added_no_tiny_elements = 1 - black_border_added_no_tiny_elements
@@ -178,7 +215,7 @@ def pre_process(path, file_name):
     cv2.imwrite('./' + file_name + '/preprocessed_image_no_tiny_elements_inverted.png',
                 255 - black_border_added_no_tiny_elements * 255)
 
-    return black_border_added, black_border_added_no_tiny_elements
+    return black_border_added, black_border_added_no_tiny_elements, anchors, image_offset_values
 
 
 # ---------------------------------------------------------------------------------
@@ -299,7 +336,7 @@ def time_print(msg):
 # All vertexes with two degree (take part of two edges exactly) - they are merged
 # if three edges create a three edged circle: (u,v) (v,w) (w,u), we remove (w,u)
 # this is done iteratively, until all vertexes have a degree of three or more!
-def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
+def prune_graph(skeleton, iter_index, file_name, anchors, idx_str=''):
     def in_bounds(p):
         r, c = p
         if 0 <= r < skeleton.shape[1] and 0 <= c < skeleton.shape[0]:
@@ -346,7 +383,8 @@ def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
 
     len_before = len(coords)
     # TODO The 4 corners are excluded from this process. they are needed as anchors.
-    excludes = [(0, 0), (skeleton.shape[1], 0), (0, skeleton.shape[0]), (skeleton.shape[1], skeleton.shape[0])]
+    # excludes = [(0, 0), (skeleton.shape[1], 0), (0, skeleton.shape[0]), (skeleton.shape[1], skeleton.shape[0])]
+    excludes = anchors
     exclude = []
     excluded = []
     for ex in excludes:
@@ -399,7 +437,7 @@ def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
                     changed = False
         if not changed:
             done = True
-            time_print('before= ' + str(len_before) + ' after= ' + str(len(coords)))
+            time_print(idx_str + 'before= ' + str(len_before) + ' after= ' + str(len(coords)))
             try_again = len_before != len(coords)
             # print(list(map(lambda co: (np.abs(co[0][0]-co[1][0]), np.abs(co[0][1]-co[1][1])), coords)))
 
@@ -525,7 +563,7 @@ def prune_graph(skeleton, iter_index, file_name, prune_circle=True):
 
 # ---------------------------------------------------------------------------------
 # ridge extraction
-def ridge_extraction(image_preprocessed, file_name):
+def ridge_extraction(image_preprocessed, file_name, anchors, idx_str=''):
     # apply distance transform then normalize image for viewing
     dist_transform = cv2.distanceTransform(image_preprocessed, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
 
@@ -544,7 +582,7 @@ def ridge_extraction(image_preprocessed, file_name):
         largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
         dist_maxima_mask_biggest_component[labels == largest_label] = val
     # extract local maxima pixels magnitude values from the distance transform
-    dist_maxima = np.multiply(dist_maxima_mask_biggest_component, dist_transform)
+    # dist_maxima = np.multiply(dist_maxima_mask_biggest_component, dist_transform)
     # TODO show before and after result
     # cv2.namedWindow('before')
     # cv2.imshow('before', dist_maxima_mask_biggest_component * 255)
@@ -581,11 +619,11 @@ def ridge_extraction(image_preprocessed, file_name):
     changed = True
     results = []
     iter_index = 0
-    time_print('pruning redundant edges and circles...')
+    time_print(idx_str + 'pruning redundant edges and circles...')
     excluded = []
     while changed:
-        time_print('iter ' + str(iter_index))
-        skeleton, results, excluded, changed = prune_graph(skeleton, iter_index, file_name)
+        time_print(idx_str + 'iter ' + str(iter_index))
+        skeleton, results, excluded, changed = prune_graph(skeleton, iter_index, file_name, anchors, idx_str)
         iter_index += 1
     time_print('done')
 
@@ -821,7 +859,6 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist):
 # ---------------------------------------------------------------------------------
 # calculate_junctions_t_scores
 def calculate_junctions_t_scores(edge_dictionary, excluded):
-    time_print('calculating t scores ...')
     t_scores = dict()
     for edge in edge_dictionary:
         # new t_scores added to t_scores variable inside calculate_edge_scores
@@ -840,7 +877,6 @@ def calculate_junctions_t_scores(edge_dictionary, excluded):
 # ---------------------------------------------------------------------------------
 # calculate minimum l_score for each vertex
 def calculate_junctions_l_scores(edge_dictionary, vertexes, excluded, max_dist=7):
-    time_print('calculating l scores ...')
     vertexes_l_scores = dict()
     for vertex in vertexes:
         if vertex in excluded:
@@ -941,10 +977,8 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
     # check whether new min junction
     bridges = set()
     links = set()
-    time_print('greedy manner labeling ...')
 
     index = 1
-    time_print('start=' + str(len(t_scores)))
     while t_scores:
         if index % 500 == 0:
             time_print(len(t_scores))
@@ -1052,7 +1086,7 @@ def create_v_scores(t_scores, l_scores):
 # ---------------------------------------------------------------------------------
 #
 def combine_edges(bridges, links, rest, edge_dictionary):
-    def merge_group(candidate_links, edge_dict, adj_list, anchors, threshold=np.pi / 2.5):
+    def merge_group(candidate_links, edge_dict, adj_list, anchors, threshold=np.pi / 3):
         # we combine two links as one if angle between them is minimum
         done = False
         while not done:
@@ -1133,7 +1167,7 @@ def combine_edges(bridges, links, rest, edge_dictionary):
     both = definite_links + can_be_both
     # combine edges - second iteration, now we include conflict edges
     both, edge_dictionary, adjacency_list = merge_group(both, edge_dictionary, adjacency_list, rest,
-                                                        threshold=np.pi / 4.0)
+                                                        threshold=np.pi / 5)
 
     # res = overlay_and_save(bridges, both, rest, edge_dictionary, image_unmodified, 'classified', 'v_scores')
     # cv2.imwrite('classified.png', res)
@@ -1165,21 +1199,23 @@ def execute(input_path):
 
         # pre-process image
         time_print('pre-process image...')
-        image_view, image_preprocessed = pre_process(input_path + image, file_name)
+        image_view, image_preprocessed, anchors, image_offset_values = pre_process(input_path + image, file_name)
         # create dir for results
 
         # extract ridges
         time_print('extract ridges, junctions...')
         # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
-        skeleton, edge_dictionary, vertexes, excluded = ridge_extraction(image_preprocessed, file_name)
+        skeleton, edge_dictionary, vertexes, excluded = ridge_extraction(image_preprocessed, file_name, anchors)
 
         # calculate T_scores for V
+        time_print('calculating t scores ...')
         t_scores = calculate_junctions_t_scores(edge_dictionary, excluded)
         # calculate l_scores for V
+        time_print('calculating l scores ...')
         l_scores = calculate_junctions_l_scores(edge_dictionary, vertexes, excluded)
         # classify using both t_scores and l_scores for v
         v_scores = create_v_scores(t_scores, l_scores)
-
+        time_print('greedy manner labeling ...')
         bridges, links, rest, edge_dictionary = greedy_classification(v_scores, edge_dictionary, skeleton, file_name,
                                                                       'v_scores')
         overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
@@ -1187,7 +1223,7 @@ def execute(input_path):
                                                                       't_scores')
         combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
 
-        print('finding vertexes with degree 2 ...')
+        time_print('finalizing ...')
         done = False
         while not done:
             all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
@@ -1206,7 +1242,8 @@ def execute(input_path):
         image = 1 - image_view
         image *= 255
         res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True)
+        draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True,
+                         image_offset_values=image_offset_values)
 
         # result = draw_graph_edges(combined_graph, cv2.cvtColor(res, cv2.COLOR_RGB2GRAY), file_name, wait_flag=False,
         # overlay=False)
@@ -1218,6 +1255,7 @@ def execute(input_path):
 
 def process_image_parallel(image_data, len_images, input_path):
     i, image = image_data
+    idx_str = '[' + str(i) + '/' + str(len_images) + '] '
     file_name = image.split('.')[0]
     print('[' + str(i) + '/' + str(len_images) + ']', file_name)
     file_name = 'results/' + file_name
@@ -1226,36 +1264,40 @@ def process_image_parallel(image_data, len_images, input_path):
     os.mkdir(file_name)
 
     # pre-process image
-    time_print('pre-process image...')
-    image_view, image_preprocessed = pre_process(input_path + image, file_name)
+    time_print(idx_str + 'pre-process image...')
+    image_view, image_preprocessed, anchors, image_offset_values = pre_process(input_path + image, file_name)
     # create dir for results
     # extract ridges
-    time_print('extract ridges, junctions...')
+    time_print('[' + str(i) + '/' + str(len_images) + '] extract ridges, junctions...')
     # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
-    skeleton, edge_dictionary, graph_vertexes, excluded = ridge_extraction(image_preprocessed, file_name)
+    skeleton, edge_dictionary, graph_vertexes, excluded = ridge_extraction(image_preprocessed, file_name, anchors,
+                                                                           idx_str)
     image_preprocessed[image_preprocessed == 1] = 2
     image_preprocessed[image_preprocessed == 0] = 1
     image_preprocessed[image_preprocessed == 2] = 0
+
     # calculate t_scores for v
+    time_print(idx_str + 'calculating t scores ...')
     t_scores = calculate_junctions_t_scores(edge_dictionary, excluded)
     # calculate l_scores for v
+    time_print(idx_str + 'calculating l scores ...')
     l_scores = calculate_junctions_l_scores(edge_dictionary, graph_vertexes, excluded)
     # classify using both t_scores and l_scores for v
     v_scores = create_v_scores(t_scores, l_scores)
-
+    time_print(idx_str + 'greedy manner labeling ...')
     bridges, links, rest, edge_dictionary = greedy_classification(v_scores, edge_dictionary, skeleton, file_name,
                                                                   'v_scores')
     overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
-    bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
-                                                                  't_scores')
-    overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
+    # bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
+    #                                                              't_scores')
+    # overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
 
     combined_graph = combine_edges(bridges,links, rest, edge_dictionary)
     image = 1 - image_view
     image *= 255
     res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True)
-
+    draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True,
+                     image_offset_values=image_offset_values)
 
     return i
 
@@ -1266,7 +1308,7 @@ def execute_parallel(input_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=3)
+    pool = ProcessPoolExecutor(max_workers=20)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     for f in futures.as_completed(wait_for):
@@ -1275,6 +1317,6 @@ def execute_parallel(input_path):
 
 if __name__ == "__main__":
         # execute_parallel("./data/original/")
-        # execute_parallel("./data/")
-        execute("./data/")
+        execute_parallel("./data/")
+        # execute("./data/")
 
