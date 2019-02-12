@@ -162,23 +162,10 @@ def pre_process(path, file_name):
     else:
         time_print('NO ELEMENTS to be deleted: MIN CLUSTER SIZE =' + str(np.count_nonzero(results == 0)))
         image_no_tiny_elements = image
-    # invert colors
-    # image_no_tiny_elements = 1 - image_no_tiny_elements
-    # image = 1 - image
-
-    # cv2.namedWindow('res')
-    # cv2.imshow('res', res * 255)
-    # cv2.waitKey()
-    # cv2.destroyAllWindows()
-
-    # print('components_to_delete=', components_to_delete)
-    # print('num_labels=', num_labels)
-    # print('labels=', labels)
-    # print('stats=', stats)
-    # print('centroids=', centroids)
 
     # add white border around image of size 29
     white_border_added_image = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 0)
+    for_view = copy.deepcopy(white_border_added_image)
     white_border_added_image_no_tiny_elements = cv2.copyMakeBorder(image_no_tiny_elements, 29, 29, 29, 29,
                                                                    cv2.BORDER_CONSTANT, None, 0)
 
@@ -199,12 +186,14 @@ def pre_process(path, file_name):
                (0, white_border_added_image_no_tiny_elements.shape[0]),
                (white_border_added_image_no_tiny_elements.shape[1], white_border_added_image_no_tiny_elements.shape[0])]
     image_offset_values = (y - 20, x - 20)
-    # print('ancors=', anchors)
+    # print('anchors=', anchors)
     # on top of that add black border of size 1
+    for_view = cv2.copyMakeBorder(for_view, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 0)
     black_border_added = cv2.copyMakeBorder(white_border_added_image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
     black_border_added_no_tiny_elements = cv2.copyMakeBorder(white_border_added_image_no_tiny_elements,
-                                                                 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
+                                                             1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
     # invert images (now black is black and white is white)
+    for_view = 1 - for_view
     black_border_added = 1 - black_border_added
     black_border_added_no_tiny_elements = 1 - black_border_added_no_tiny_elements
 
@@ -215,7 +204,7 @@ def pre_process(path, file_name):
     cv2.imwrite('./' + file_name + '/preprocessed_image_no_tiny_elements_inverted.png',
                 255 - black_border_added_no_tiny_elements * 255)
 
-    return black_border_added, black_border_added_no_tiny_elements, anchors, image_offset_values
+    return for_view, black_border_added_no_tiny_elements, anchors, image_offset_values
 
 
 # ---------------------------------------------------------------------------------
@@ -1149,7 +1138,6 @@ def combine_edges(bridges, links, rest, edge_dictionary):
                 # print('------------------------')
         return candidate_links, edge_dict, adj_list
 
-    time_print('combining graph edges ...')
     # draw_graph_edges(edge_dictionary, res, 'before', wait_flag=False, overlay=True)
 
     can_be_both = [e for e in links if e in bridges]
@@ -1180,6 +1168,49 @@ def combine_edges(bridges, links, rest, edge_dictionary):
         edge_dictionary.pop(bridge)
 
     return edge_dictionary
+
+
+# ---------------------------------------------------------------------------------
+# finalize_graph - remove wrong direction edges - and combine edges of two degree vertexes
+# text_angle is text direction relative to x axis
+def finalize_graph(combined_graph, anchors, text_angle=0, threshold=np.pi / 4):
+    def calc_angle(edge):
+        u, v = edge
+        # print('u=', u, 'v=', v)
+        delta_x = v[0] - u[0]
+        delta_y = v[1] - u[1]
+        # print('delta_x=', delta_x, 'delta_y=', delta_y)
+        angle = np.arctan(delta_y / delta_x)
+        return np.abs(angle)
+
+    anchors = [(anchor[1], anchor[0]) for anchor in anchors]
+    anchor_edges = [edge for edge in combined_graph.keys() if edge[0] in anchors or edge[1] in anchors]
+
+    # flat_anchors = [tuple(val) for sublist in anchor_edges for val in sublist]
+    # remove edges that their angle is not within text_angle threshold
+    # remove_candidates = [edge for edge in combined_graph.keys() if edge[0] not in flat_anchors
+    #                     and edge[1] not in flat_anchors and calc_angle(edge) < threshold]
+    # print('remove_candidates=', remove_candidates)
+    remove_candidates = [edge for edge in combined_graph.keys() if calc_angle(edge) < threshold]
+    for candidate in set(remove_candidates + anchor_edges):
+        combined_graph.pop(candidate)
+
+    # merge two degree vertexes
+    done = False
+    while not done:
+        all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
+        vertexes = list(set(all_vertexes))
+        done = True
+        for vertex in vertexes:
+            two_links = [link for link in combined_graph.keys() if vertex in link]
+            if len(two_links) == 2:
+                pixels_1 = combined_graph.pop(two_links[0])
+                pixels_2 = combined_graph.pop(two_links[1])
+                new_edge = (two_links[0][0], two_links[1][0] if two_links[1][0] != two_links[0][1] else two_links[1][1])
+                combined_graph[new_edge] = pixels_1 + pixels_2
+                done = False
+                break
+    return combined_graph
 
 
 # ---------------------------------------------------------------------------------
@@ -1221,23 +1252,11 @@ def execute(input_path):
         overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
         bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
                                                                       't_scores')
+        time_print('combining graph edges ...')
         combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
 
-        time_print('finalizing ...')
-        done = False
-        while not done:
-            all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
-            vertexes = list(set(all_vertexes))
-            done = True
-            for vertex in vertexes:
-                two_links = [link for link in combined_graph.keys() if vertex in link]
-                if len(two_links) == 2:
-                    pixels_1 = combined_graph.pop(two_links[0])
-                    pixels_2 = combined_graph.pop(two_links[1])
-                    new_edge = (two_links[0][0], two_links[1][0] if two_links[1][0] != two_links[0][1] else two_links[1][1])
-                    combined_graph[new_edge] = pixels_1 + pixels_2
-                    done = False
-                    break
+        time_print('finalizing document graph ...')
+        combined_graph = finalize_graph(combined_graph, anchors)
 
         image = 1 - image_view
         image *= 255
@@ -1291,8 +1310,12 @@ def process_image_parallel(image_data, len_images, input_path):
     # bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
     #                                                              't_scores')
     # overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
-
+    time_print(idx_str + 'combining graph edges ...')
     combined_graph = combine_edges(bridges,links, rest, edge_dictionary)
+
+
+
+
     image = 1 - image_view
     image *= 255
     res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
@@ -1311,12 +1334,15 @@ def execute_parallel(input_path):
     pool = ProcessPoolExecutor(max_workers=20)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
+    i = 0
+    total = len(images)
     for f in futures.as_completed(wait_for):
-        time_print(str(f.result()) + ' done!')
+        i += 1
+        time_print('[' + str(i) + '/' + str(total) + ']' + str(f.result()) + ' done!')
 
 
 if __name__ == "__main__":
         # execute_parallel("./data/original/")
-        execute_parallel("./data/")
-        # execute("./data/")
+        # execute_parallel("./data/")
+        execute("./data/")
 
