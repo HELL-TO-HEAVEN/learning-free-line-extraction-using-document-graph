@@ -23,10 +23,15 @@ from concurrent.futures import ProcessPoolExecutor
 
 # ---------------------------------------------------------------------------------
 # draw_edges(edges, edge_dictionary, image, color):
-def draw_edges(edges, edge_dictionary, image, color):
+def draw_edges(edges, edge_dictionary, image, color, image_offset_values=None):
     for edge in edges:
         edge_list = edge_dictionary[edge]
-        image = overlay_edges(image, edge_list, color)
+        if image_offset_values is not None:
+            offset_edge_list = [(e[0]+image_offset_values[0], e[1]+image_offset_values[1]) for e
+                                in edge_list]
+        else:
+            offset_edge_list = edge_list
+        image = overlay_edges(image, offset_edge_list, color)
     return image
 
 
@@ -63,7 +68,7 @@ def get_spaced_colors(n):
 
 # ---------------------------------------------------------------------------------
 # draw_graph_edges
-def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False, overlay=False, image_offset_values=None):
+def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False, overlay=False, image_offset_values=None, file_name=None):
     if overlay:
         after_ridge_mask = ridges_mask
     else:
@@ -75,6 +80,8 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
         if image_offset_values is not None:
             offset_edge_list = [(e[0]+image_offset_values[0], e[1]+image_offset_values[1]) for e
                                 in edge_list]
+        else:
+            offset_edge_list = edge_list
         after_ridge_mask = overlay_edges(after_ridge_mask, offset_edge_list, random_colors[i])
         i += 1
     for two_vertex in edge_dictionary.keys():
@@ -85,21 +92,21 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
         after_ridge_mask[v1] = (255, 255, 255)
         after_ridge_mask[v2] = (255, 255, 255)
 
-    time_print('SAVED: ./' + window_name + '/final_result.png')
-    cv2.imwrite('./' + window_name + '/final_result.png', after_ridge_mask)
-    cv2.imwrite('./' + window_name + '/final_result_inverted.png', 255 - after_ridge_mask)
+    name = './' + window_name + '/' + file_name + '.png'
+    cv2.imwrite(name, after_ridge_mask)
+    cv2.imwrite('./' + window_name + '/' + file_name + '_inverted.png', 255 - after_ridge_mask)
     if wait_flag:
         cv2.namedWindow(window_name)
         cv2.imshow(window_name, after_ridge_mask)
         cv2.waitKey()
         cv2.destroyAllWindows()
 
-    return after_ridge_mask
+    return name
 
 
 # ---------------------------------------------------------------------------------
 # document pre processing
-def pre_process(path, file_name):
+def pre_process(path, file_name, str_idx=''):
     def cluster_elements(all_stats):
         max_cluster_size = 0.15
         n_clusters = 11
@@ -147,7 +154,7 @@ def pre_process(path, file_name):
     results, min_cluster = cluster_elements(stats)
     if min_cluster is not None:
         index = 0
-        time_print('elements to be deleted: ' + str(np.count_nonzero(results == 0)))
+        time_print(str_idx + 'elements to be deleted: ' + str(np.count_nonzero(results == 0)))
         for clustered in results:
             if clustered == min_cluster:
                 # print('deleted:', index, 'size=', stats[index, 5])
@@ -160,7 +167,7 @@ def pre_process(path, file_name):
         image_no_tiny_elements = op.and_(image, labels.astype(np.uint8))
         cv2.imwrite('./' + file_name + '/image_no_tiny_elements.png', image_no_tiny_elements * 255)
     else:
-        time_print('NO ELEMENTS to be deleted: MIN CLUSTER SIZE =' + str(np.count_nonzero(results == 0)))
+        time_print(str_idx + 'NO ELEMENTS to be deleted: MIN CLUSTER SIZE =' + str(np.count_nonzero(results == 0)))
         image_no_tiny_elements = image
 
     # add white border around image of size 29
@@ -519,12 +526,12 @@ def prune_graph(skeleton, iter_index, file_name, anchors, idx_str=''):
                         remove_candidates.add(candidate_wv)
     # remove all edges that create a 3-edged circle,
     # for each edge the removed edge is the longest of all 3-edges of the circle
-    time_print('removing circles ...')
+    time_print(idx_str + 'removing circles ...')
     remove_items = [(edge[0], edge[1], results_dict.pop(edge)) for edge in remove_candidates]
     # if no edge was removed above, but a circle is removed, we need a new iteration due to changes.
     if remove_items:
         try_again = True
-    time_print('before= ' + str(len(results)) + ' to_remove= ' + str(len(remove_items)))
+    time_print(idx_str + 'before= ' + str(len(results)) + ' to_remove= ' + str(len(remove_items)))
     results = list(filter(lambda element: element not in remove_items, results))
 
     # create new skeleton following graph pruning
@@ -614,7 +621,7 @@ def ridge_extraction(image_preprocessed, file_name, anchors, idx_str=''):
         time_print(idx_str + 'iter ' + str(iter_index))
         skeleton, results, excluded, changed = prune_graph(skeleton, iter_index, file_name, anchors, idx_str)
         iter_index += 1
-    time_print('done')
+    time_print(idx_str + 'done')
 
     colors = []
     image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
@@ -954,7 +961,7 @@ def overlay_and_save(bridges, links, rest, edge_dictionary, image_preprocessed, 
 
 # ---------------------------------------------------------------------------------
 #
-def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_type):
+def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_type, image_offset_values):
     # in greedy manner: find junction in v_scores where u,v v,w1 v,w2 has minimum T score
     # mark u,v as Bridge
     # mark v,w1 and v,w2 as Link
@@ -1164,23 +1171,24 @@ def combine_edges(bridges, links, rest, edge_dictionary):
 
     # remove bridges from document graph that were not used in conflict stage
     only_bridges = [bridge for bridge in bridges if bridge in edge_dictionary.keys()]
+    bridges_dict = dict()
     for bridge in only_bridges:
-        edge_dictionary.pop(bridge)
+        bridges_dict[bridge] = edge_dictionary.pop(bridge)
 
-    return edge_dictionary
+    return bridges_dict, edge_dictionary
 
 
 # ---------------------------------------------------------------------------------
 # finalize_graph - remove wrong direction edges - and combine edges of two degree vertexes
 # text_angle is text direction relative to x axis
-def finalize_graph(combined_graph, anchors, text_angle=0, threshold=np.pi / 4):
+def finalize_graph(combined_graph, only_bridges, anchors, text_angle=0, threshold=np.pi / 4):
     def calc_angle(edge):
-        u, v = edge
+        u_e, v_e = edge
         # print('u=', u, 'v=', v)
-        delta_x = v[0] - u[0]
-        delta_y = v[1] - u[1]
+        delta_x = v_e[0] - u_e[0]
+        delta_y = v_e[1] - u_e[1]
         # print('delta_x=', delta_x, 'delta_y=', delta_y)
-        angle = np.arctan(delta_y / delta_x)
+        angle = np.arctan2(delta_y, delta_x)
         return np.abs(angle)
 
     anchors = [(anchor[1], anchor[0]) for anchor in anchors]
@@ -1194,6 +1202,30 @@ def finalize_graph(combined_graph, anchors, text_angle=0, threshold=np.pi / 4):
     remove_candidates = [edge for edge in combined_graph.keys() if calc_angle(edge) < threshold]
     for candidate in set(remove_candidates + anchor_edges):
         combined_graph.pop(candidate)
+
+    # add back bridges following this rule: if (u,v) and (w,z) are two edges in combined_graph
+    # check if deg(v)=1 and deg(w)=1 and (v,w) \in only_bridges
+    # then remove (u,v) remove (w,z) add (u,z) instead
+    done = False
+    # print('only_bridges_total=', len(only_bridges.keys()))
+    while not done:
+        done = True
+        for bridge in only_bridges.keys():
+            v, w = bridge
+            link_1 = [link for link in combined_graph.keys() if v in link]
+            link_2 = [link for link in combined_graph.keys() if w in link]
+            # print('link_1=', link_1)
+            # print('link_2=', link_2)
+            if len(link_1) == 1 and len(link_2) == 1:
+                # print('adding back bridge!!')
+                pixels_1 = combined_graph.pop(link_1[0])
+                pixels_2 = combined_graph.pop(link_2[0])
+                pixels_3 = only_bridges[bridge]
+                new_edge = (link_1[0][0] if link_1[0][0] != v else link_1[0][1],
+                            link_2[0][0] if link_2[0][0] != w else link_2[0][1])
+                combined_graph[new_edge] = pixels_1 + pixels_2 + pixels_3
+                done = False
+                break
 
     # merge two degree vertexes
     done = False
@@ -1215,7 +1247,7 @@ def finalize_graph(combined_graph, anchors, text_angle=0, threshold=np.pi / 4):
 
 # ---------------------------------------------------------------------------------
 # main execution function
-def execute(input_path):
+def execute(input_path, output_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
     i = 1
@@ -1223,7 +1255,7 @@ def execute(input_path):
     for image in images:
         file_name = image.split('.')[0]
         print('[' + str(i) + '/' + str(len(images)) + ']', file_name)
-        file_name = 'results/' + file_name
+        file_name = output_path + file_name
         if os.path.exists(file_name) and os.path.isdir(file_name):
             shutil.rmtree(file_name)
         os.mkdir(file_name)
@@ -1248,43 +1280,46 @@ def execute(input_path):
         v_scores = create_v_scores(t_scores, l_scores)
         time_print('greedy manner labeling ...')
         bridges, links, rest, edge_dictionary = greedy_classification(v_scores, edge_dictionary, skeleton, file_name,
-                                                                      'v_scores')
-        overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
-        bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
-                                                                      't_scores')
-        time_print('combining graph edges ...')
-        combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
-
-        time_print('finalizing document graph ...')
-        combined_graph = finalize_graph(combined_graph, anchors)
-
+                                                                      'v_scores', image_offset_values)
+        # overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
         image = 1 - image_view
         image *= 255
-        res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True,
-                         image_offset_values=image_offset_values)
+        res_no_finalization = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        res_finalization = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+        time_print('combining graph edges ...')
+        only_bridges, combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
+
+        draw_graph_edges(combined_graph, res_no_finalization, file_name, wait_flag=False, overlay=True,
+                         image_offset_values=image_offset_values, file_name='final_result_no_finalize')
+
+        time_print('finalizing document graph ...')
+        finalized_combined_graph = finalize_graph(combined_graph, only_bridges, anchors)
+
+        name = draw_graph_edges(finalized_combined_graph, res_finalization, file_name, wait_flag=False, overlay=True,
+                         image_offset_values=image_offset_values, file_name='final_result_finalize')
 
         # result = draw_graph_edges(combined_graph, cv2.cvtColor(res, cv2.COLOR_RGB2GRAY), file_name, wait_flag=False,
         # overlay=False)
         # result = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
         # result[result != 0] = 1
-
+        time_print('SAVED: ' + str(name))
         i += 1
 
 
-def process_image_parallel(image_data, len_images, input_path):
+def process_image_parallel(image_data, len_images, input_path, output_path):
     i, image = image_data
     idx_str = '[' + str(i) + '/' + str(len_images) + '] '
     file_name = image.split('.')[0]
     print('[' + str(i) + '/' + str(len_images) + ']', file_name)
-    file_name = 'results/' + file_name
+    file_name = output_path + file_name
     if os.path.exists(file_name) and os.path.isdir(file_name):
         shutil.rmtree(file_name)
     os.mkdir(file_name)
 
     # pre-process image
     time_print(idx_str + 'pre-process image...')
-    image_view, image_preprocessed, anchors, image_offset_values = pre_process(input_path + image, file_name)
+    image_view, image_preprocessed, anchors, image_offset_values = pre_process(input_path + image, file_name, idx_str)
     # create dir for results
     # extract ridges
     time_print('[' + str(i) + '/' + str(len_images) + '] extract ridges, junctions...')
@@ -1305,34 +1340,42 @@ def process_image_parallel(image_data, len_images, input_path):
     v_scores = create_v_scores(t_scores, l_scores)
     time_print(idx_str + 'greedy manner labeling ...')
     bridges, links, rest, edge_dictionary = greedy_classification(v_scores, edge_dictionary, skeleton, file_name,
-                                                                  'v_scores')
+                                                                  'v_scores', image_offset_values)
     overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
-    # bridges, links, rest, edge_dictionary = greedy_classification(t_scores, edge_dictionary, skeleton, file_name,
-    #                                                              't_scores')
-    # overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 't_scores')
+
     time_print(idx_str + 'combining graph edges ...')
-    combined_graph = combine_edges(bridges,links, rest, edge_dictionary)
-
-
-
+    only_bridges, combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
 
     image = 1 - image_view
     image *= 255
-    res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    draw_graph_edges(combined_graph, res, file_name, wait_flag=False, overlay=True,
-                     image_offset_values=image_offset_values)
+    res_no_finalization = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    res_finalization = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+    draw_graph_edges(combined_graph, res_no_finalization, file_name, wait_flag=False, overlay=True,
+                     image_offset_values=image_offset_values, file_name='final_result_no_finalize')
+    time_print(idx_str + 'finalizing document graph ...')
+    finalized_combined_graph = finalize_graph(combined_graph, only_bridges, anchors)
+
+    name = draw_graph_edges(finalized_combined_graph, res_finalization, file_name, wait_flag=False, overlay=True,
+                            image_offset_values=image_offset_values, file_name='final_result_finalize')
+
+    # result = draw_graph_edges(combined_graph, cv2.cvtColor(res, cv2.COLOR_RGB2GRAY), file_name, wait_flag=False,
+    # overlay=False)
+    # result = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+    # result[result != 0] = 1
+    time_print('SAVED: ' + str(name))
 
     return i
 
 
 # ---------------------------------------------------------------------------------
 # main execution function
-def execute_parallel(input_path):
+def execute_parallel(input_path, output_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=20)
-    wait_for = [pool.submit(process_image_parallel, image, len(images), input_path) for image in zip(range(1, len(images)), images)]
+    pool = ProcessPoolExecutor(max_workers=12)
+    wait_for = [pool.submit(process_image_parallel, image, len(images), input_path, output_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     i = 0
     total = len(images)
@@ -1342,7 +1385,8 @@ def execute_parallel(input_path):
 
 
 if __name__ == "__main__":
-        # execute_parallel("./data/original/")
-        # execute_parallel("./data/")
-        execute("./data/")
+        # execute_parallel('./data/original/')
+        # execute_parallel('./data/')
+        execute_parallel('./data/', './results/')
+        # execute('./data/', './results/')
 
