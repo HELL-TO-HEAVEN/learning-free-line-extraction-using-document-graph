@@ -1,4 +1,5 @@
 import os
+import sys
 import cv2
 import copy
 import shutil
@@ -14,7 +15,9 @@ from skan import csr
 from os import listdir
 from skimage import morphology
 from os.path import isfile, join
+from peakutils import peak as pk
 from decimal import Decimal, getcontext
+
 
 from concurrent import futures
 from sklearn.cluster import KMeans
@@ -105,10 +108,127 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
 
 
 # ---------------------------------------------------------------------------------
+# split touching lines. find mean line width in image
+# find connected components
+# calculate width (x_max - x_min)
+# cluster connected components following width
+# find cluster with highest width average
+# for each connected component create histogram. each bin is row value count number of pixels
+# find three adjacent bins with min average of all, and remove them from image
+def split_touching_lines(image):
+    def draw_component_on_image(label_i, all_labels, overlay_image, color):
+        for index in zip(*np.where(all_labels == label_i)):
+            overlay_image[index] = color
+
+    def cluster_elements(widths_to_cluster):
+        max_cluster_threhold = 0.15
+        n_clusters = 3
+        widths_to_cluster = np.asarray(widths_to_cluster).reshape(-1, 1)
+        k_means = KMeans(n_clusters=n_clusters)
+        k_means.fit(widths_to_cluster)
+        y_k_means = k_means.predict(widths_to_cluster)
+
+        cluster_size = [len(list(filter(lambda x: x == i, y_k_means))) for i in range(n_clusters)]
+        # print('cluster_sizes=', cluster_size)
+        total = sum(cluster_size)
+        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), widths_to_cluster),
+                                   0) for i in range(n_clusters)]
+        max_cluster = np.argmax([c[1]/c[0] for c in zip(cluster_size, cluster_total)])
+        max_cluster_size = cluster_size.count(max_cluster)
+        # THIS IS A THRESHOLD
+        # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
+        if max_cluster_size / total < max_cluster_threhold:
+                return y_k_means, max_cluster
+        else:
+            return y_k_means, None
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=8, ltype=cv2.CV_32S)
+    heights = [component[3] for component in stats[1:]]
+    clustered, max_cluster_index = cluster_elements(heights)
+
+    # to_view = cv2.cvtColor(np.zeros_like(labels, np.uint8), cv2.COLOR_GRAY2RGB)
+    # i = 1
+    # for component in clustered:
+    #         if component == max_cluster_index:
+    #             draw_component_on_image(i, labels, to_view, (0, 0, 255))
+    #        i += 1
+
+    to_view = cv2.cvtColor(np.zeros_like(labels, np.uint8), cv2.COLOR_GRAY2RGB)
+    i = 1
+    for component in clustered:
+        if component == 0:
+            draw_component_on_image(i, labels, to_view, (0, 0, 255))
+        elif component == 1:
+            draw_component_on_image(i, labels, to_view, (0, 255, 0))
+        elif component == 2:
+            draw_component_on_image(i, labels, to_view, (255, 0, 0))
+        i += 1
+    # print('max_cluster_index=', max_cluster_index)
+
+    i = 1
+    for component in clustered:
+        if component == max_cluster_index:
+            component_indexes = list(zip(*np.where(labels == i)))
+            # create histogram then split !
+            y_indexes = [index[0] for index in component_indexes]
+            # print('y_indexes=', y_indexes)
+            min_y = min(y_indexes)
+            max_y = max(y_indexes)
+            histogram = [0 for x in range(min_y, max_y + 1)]
+            # print('histogramLen=', len(histogram))
+            # print('histogram=', histogram)
+            # print('min_y=', min_y, 'max_y=', max_y)
+            j = 0
+            for y_val in range(min_y, max_y + 1):
+                histogram[j] = y_indexes.count(y_val)
+                j += 1
+            peaks_indexes = pk.indexes(np.array(histogram))
+            valleys_indexes = pk.indexes(-1 * np.array(histogram))
+            valley_values = [histogram[value] for value in valleys_indexes]
+            left_peak = peaks_indexes[0]
+            right_peak = peaks_indexes[len(peaks_indexes) - 1]
+            # print('Peaks are: %s' % peaks_indexes)
+            # print('valleys are: %s' % valleys_indexes)
+            # print('leftPeak=', peaks_indexes[0], 'peakSize=', histogram[peaks_indexes[0]])
+            # print('rightPeak=', peaks_indexes[len(peaks_indexes) - 1],
+            #       'peakSize=', histogram[peaks_indexes[len(peaks_indexes) - 1]])
+            # if valleys_indexes[np.argmin(valley_values)]
+            min_valley = valleys_indexes[np.argmin(valley_values)]
+            while min_valley < left_peak or min_valley > right_peak:
+                valley_values[np.argmin(valley_values)] = sys.maxsize
+                min_valley = valleys_indexes[np.argmin(valley_values)]
+
+            # print('minValley=', valleys_indexes[np.argmin(valley_values)],
+            #       'size=', histogram[valleys_indexes[np.argmin(valley_values)]])
+
+            # from matplotlib import pyplot as plt
+            # plt.plot(histogram, color='b')
+            # plt.xlim([0, len(histogram)])
+            # plt.show()
+            # min_idx = np.argmin(histogram)
+            RANGE_TO_REMOVE = 2
+            for j in range(-RANGE_TO_REMOVE, RANGE_TO_REMOVE):
+                y_to_remove = min_y + min_valley + j
+                indices_to_remove = [index for index in component_indexes if index[0] == y_to_remove]
+                # print('indices_to_remove=', indices_to_remove)
+                for index in indices_to_remove:
+                    image[index] = 0
+                    to_view[index] = (255, 255, 255)
+        i += 1
+    # cv2.imwrite('image_' + str(itr) + '.png', image * 255)
+    # cv2.namedWindow('to_view', cv2.WINDOW_NORMAL)
+    # cv2.imshow('to_view', to_view)
+    # cv2.waitKey()
+    # cv2.destroyAllWindows()
+    # exit()
+    return image, to_view
+
+
+# ---------------------------------------------------------------------------------
 # document pre processing
 def pre_process(path, file_name, str_idx=''):
     def cluster_elements(all_stats):
-        max_cluster_size = 0.15
+        max_cluster_threshold = 0.15
         n_clusters = 11
         data_list = [stat[5] for stat in all_stats]
         # print('data_list=', data_list)
@@ -126,7 +246,7 @@ def pre_process(path, file_name, str_idx=''):
         minimum_cluster_size = cluster_size.count(minimum_cluster)
         # THIS IS A THRESHOLD
         # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
-        if minimum_cluster_size / total < max_cluster_size:
+        if minimum_cluster_size / total < max_cluster_threshold:
                 return y_k_means, minimum_cluster
         else:
             return y_k_means, None
@@ -169,6 +289,13 @@ def pre_process(path, file_name, str_idx=''):
     else:
         time_print(str_idx + 'NO ELEMENTS to be deleted: MIN CLUSTER SIZE =' + str(np.count_nonzero(results == 0)))
         image_no_tiny_elements = image
+
+    # split touching lines
+    time_print(str_idx + 'split touching lines ...')
+    image_no_tiny_elements, to_view = split_touching_lines(image_no_tiny_elements)
+    cv2.imwrite('./' + file_name + '/remove_touching_lines.png', image_no_tiny_elements * 255)
+    cv2.imwrite('./' + file_name + '/clustered_remove_touching_lines.png', to_view)
+    # image_no_tiny_elements = split_touching_lines(image_no_tiny_elements, 2)
 
     # add white border around image of size 29
     white_border_added_image = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 0)
@@ -1374,7 +1501,7 @@ def execute_parallel(input_path, output_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=12)
+    pool = ProcessPoolExecutor(max_workers=22)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path, output_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     i = 0
@@ -1387,6 +1514,7 @@ def execute_parallel(input_path, output_path):
 if __name__ == "__main__":
         # execute_parallel('./data/original/')
         # execute_parallel('./data/')
-        execute_parallel('./data/', './results/')
-        # execute('./data/', './results/')
+        # execute_parallel('./CSG18_data/', './CSG18_results/')
+        # execute_parallel('./data/', './results/')
+        execute('./data/', './results/')
 
