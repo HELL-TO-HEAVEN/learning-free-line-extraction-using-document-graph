@@ -1,9 +1,11 @@
 import os
-import sys
 import cv2
+import math
 import copy
+import pylab
 import shutil
 import datetime
+
 import numpy as np
 import random as rd
 import operator as op
@@ -13,15 +15,65 @@ import collections as col
 
 from skan import csr
 from os import listdir
+from scipy import optimize
 from skimage import morphology
 from os.path import isfile, join
-from peakutils import peak as pk
+from matplotlib import pyplot as plt
 from decimal import Decimal, getcontext
-
 
 from concurrent import futures
 from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
 from concurrent.futures import ProcessPoolExecutor
+
+
+def interpolated_intercepts(x, y1, y2):
+    """Find the intercepts of two curves, given by the same x data"""
+
+    def intercept(point1, point2, point3, point4):
+        """find the intersection between two lines
+        the first line is defined by the line between point1 and point2
+        the first line is defined by the line between point3 and point4
+        each point is an (x,y) tuple.
+
+        So, for example, you can find the intersection between
+        intercept((0,0), (1,1), (0,1), (1,0)) = (0.5, 0.5)
+
+        Returns: the intercept, in (x,y) format
+        """
+
+        def line(p1, p2):
+            A = (p1[1] - p2[1])
+            B = (p2[0] - p1[0])
+            C = (p1[0]*p2[1] - p2[0]*p1[1])
+            return A, B, -C
+
+        def intersection(L1, L2):
+            D  = L1[0] * L2[1] - L1[1] * L2[0]
+            Dx = L1[2] * L2[1] - L1[1] * L2[2]
+            Dy = L1[0] * L2[2] - L1[2] * L2[0]
+
+            x = Dx / D
+            y = Dy / D
+            return x,y
+
+        L1 = line([point1[0],point1[1]], [point2[0],point2[1]])
+        L2 = line([point3[0],point3[1]], [point4[0],point4[1]])
+
+        R = intersection(L1, L2)
+
+        return R
+
+    idxs = np.argwhere(np.diff(np.sign(y1 - y2)) != 0)
+
+    xcs = []
+    ycs = []
+
+    for idx in idxs:
+        xc, yc = intercept((x[idx], y1[idx]),((x[idx+1], y1[idx+1])), ((x[idx], y2[idx])), ((x[idx+1], y2[idx+1])))
+        xcs.append(xc)
+        ycs.append(yc)
+    return np.array(xcs), np.array(ycs)
 
 
 # ---------------------------------------------------------------------------------
@@ -116,35 +168,81 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
 # for each connected component create histogram. each bin is row value count number of pixels
 # find three adjacent bins with min average of all, and remove them from image
 def split_touching_lines(image):
+    def gauss(x_value, mu, sigma, A):
+        return A * pylab.exp(-(x_value - mu) ** 2 / 2 / sigma ** 2)
+
+    def bimodal(x_value, mu_1, sigma_1, a_1, mu_2, sigma_2, a_2):
+        return gauss(x_value, mu_1, sigma_1, a_1) + gauss(x_value, mu_2, sigma_2, a_2)
+
     def draw_component_on_image(label_i, all_labels, overlay_image, color):
         for index in zip(*np.where(all_labels == label_i)):
             overlay_image[index] = color
 
-    def cluster_elements(widths_to_cluster):
-        max_cluster_threhold = 0.15
-        n_clusters = 3
-        widths_to_cluster = np.asarray(widths_to_cluster).reshape(-1, 1)
-        k_means = KMeans(n_clusters=n_clusters)
-        k_means.fit(widths_to_cluster)
-        y_k_means = k_means.predict(widths_to_cluster)
+    def draw_component(pixels_list, draw_on_image):
+        for p in pixels_list:
+            draw_on_image[p] = (255, 0, 0)
 
-        cluster_size = [len(list(filter(lambda x: x == i, y_k_means))) for i in range(n_clusters)]
+    def cluster_elements(heights_to_cluster):
+        n_clusters = 3
+        heights_to_cluster = np.asarray(heights_to_cluster).reshape(-1, 1)
+        # k_means = KMeans(n_clusters=n_clusters)
+        gmm = GaussianMixture(n_components=n_clusters)
+        # k_means.fit(heights_to_cluster)
+        gmm.fit(heights_to_cluster)
+        # y_k_means = k_means.predict(heights_to_cluster)
+        y_k_means = gmm.predict(heights_to_cluster)
+        # print('y_k_means=', y_k_means)
+        # print('y_k_gmms=', y_k_means_gmm)
+        # print('=------------------=')
+        clustered_heights = [[] for k in range(n_clusters)]
+
+        for k in range(n_clusters):
+            ix = 0
+            for y_k in y_k_means:
+                if y_k == k:
+                    clustered_heights[k].append(heights_to_cluster[ix][0])
+                ix += 1
+
+        # for k, cluster_i in enumerate(clustered_heights):
+        #     print(cluster_i)
+        #     print('average=', k, sum(cluster_i) / len(cluster_i))
+
+        # for k, item in enumerate(clustered_heights):
+        #     print('clustered_heights=', k, item)
+        clusters = [list(filter(lambda x_0: x_0 == k, y_k_means)) for k in range(n_clusters)]
+        cluster_size = [len(cluster) for cluster in clusters]
+        # print('cluster_size=', cluster_size)
+        cluster_total_heights = [sum(heights_to_cluster[l[0]] for l in enumerate(y_k_means) if l[1] == k) for k in
+                                 range(n_clusters)]
+        cluster_average_sizes = [pair[0] / pair[1] for pair in zip(cluster_total_heights, cluster_size)]
+
         # print('cluster_sizes=', cluster_size)
-        total = sum(cluster_size)
-        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), widths_to_cluster),
-                                   0) for i in range(n_clusters)]
+        # print('cluster_total_widths=', cluster_total_heights)
+        # print('cluster_average_sizes=', cluster_average_sizes)
+
+        cluster_total = [ft.reduce(lambda x_1, y_1: x_1 + y_1[1] if y_1[0] == k else x_1,
+                                   zip(list(y_k_means), heights_to_cluster), 0) for k in range(n_clusters)]
         max_cluster = np.argmax([c[1]/c[0] for c in zip(cluster_size, cluster_total)])
-        max_cluster_size = cluster_size.count(max_cluster)
-        # THIS IS A THRESHOLD
-        # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
-        if max_cluster_size / total < max_cluster_threhold:
-                return y_k_means, max_cluster
+        # print('maxCluster=', max_cluster)
+        # print('heights=', cluster_average_sizes)
+        ratios = [(cluster_average_sizes[z] / cluster_average_sizes[max_cluster])[0] for z in range(n_clusters)]
+        # print('ratios=', ratios)
+        ratios[np.argmax(ratios)] = -1
+        second_cluster = ratios[np.argmax(ratios)]
+        # print('second_cluster=', second_cluster)
+        # print('max_cluster=', max_cluster)
+        if second_cluster <= 0.60:
+            return y_k_means, max_cluster
         else:
             return y_k_means, None
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=8, ltype=cv2.CV_32S)
     heights = [component[3] for component in stats[1:]]
     clustered, max_cluster_index = cluster_elements(heights)
+
+    if max_cluster_index is None:
+        print('No touching lines to be split!')
+        return image, None, None
 
     # to_view = cv2.cvtColor(np.zeros_like(labels, np.uint8), cv2.COLOR_GRAY2RGB)
     # i = 1
@@ -164,64 +262,104 @@ def split_touching_lines(image):
             draw_component_on_image(i, labels, to_view, (255, 0, 0))
         i += 1
     # print('max_cluster_index=', max_cluster_index)
-
+    before_splitting = copy.deepcopy(to_view)
     i = 1
+    total_segmented = 0
+    print('components to be checked: ', len(clustered))
+    # print('clustered=', clustered)
     for component in clustered:
+        component_image = np.zeros_like(image)
+        draw_component_on_image(i, labels, component_image, 255)
+        x, y, w, h, = cv2.boundingRect(component_image)
+        component_image = component_image[y: y + h, x: x + w]
+        # cv2.imwrite(str(i) + '_' + str(component) + '.png', component_image)
+        # find bimodal gaussian fit
+        # calc area of each gaussian in (0, len(histogram)
+        # calc overlapping area
         if component == max_cluster_index:
+            # print('INDEX = ', i, )
+            component_image = np.zeros_like(image)
+            draw_component_on_image(i, labels, component_image, 255)
+            x, y, w, h, = cv2.boundingRect(component_image)
+            component_image = component_image[y: y + h, x: x + w]
+            new_image = cv2.cvtColor(np.zeros_like(component_image), cv2.COLOR_GRAY2RGB)
+            new_image[component_image == 255] = (255, 0, 0)
+            # cv2.imwrite('component_before.png', new_image)
+            component_image = new_image
             component_indexes = list(zip(*np.where(labels == i)))
             # create histogram then split !
             y_indexes = [index[0] for index in component_indexes]
             # print('y_indexes=', y_indexes)
             min_y = min(y_indexes)
             max_y = max(y_indexes)
-            histogram = [0 for x in range(min_y, max_y + 1)]
-            # print('histogramLen=', len(histogram))
-            # print('histogram=', histogram)
-            # print('min_y=', min_y, 'max_y=', max_y)
             j = 0
+            histogram = [0 for x in range(min_y, max_y + 1)]
             for y_val in range(min_y, max_y + 1):
                 histogram[j] = y_indexes.count(y_val)
                 j += 1
-            peaks_indexes = pk.indexes(np.array(histogram))
-            valleys_indexes = pk.indexes(-1 * np.array(histogram))
-            valley_values = [histogram[value] for value in valleys_indexes]
-            left_peak = peaks_indexes[0]
-            right_peak = peaks_indexes[len(peaks_indexes) - 1]
-            # print('Peaks are: %s' % peaks_indexes)
-            # print('valleys are: %s' % valleys_indexes)
-            # print('leftPeak=', peaks_indexes[0], 'peakSize=', histogram[peaks_indexes[0]])
-            # print('rightPeak=', peaks_indexes[len(peaks_indexes) - 1],
-            #       'peakSize=', histogram[peaks_indexes[len(peaks_indexes) - 1]])
-            # if valleys_indexes[np.argmin(valley_values)]
-            min_valley = valleys_indexes[np.argmin(valley_values)]
-            while min_valley < left_peak or min_valley > right_peak:
-                valley_values[np.argmin(valley_values)] = sys.maxsize
-                min_valley = valleys_indexes[np.argmin(valley_values)]
 
-            # print('minValley=', valleys_indexes[np.argmin(valley_values)],
-            #       'size=', histogram[valleys_indexes[np.argmin(valley_values)]])
-
-            # from matplotlib import pyplot as plt
-            # plt.plot(histogram, color='b')
+            # plt.plot(histogram, color='black', label='hist')
             # plt.xlim([0, len(histogram)])
+            # plt.savefig('height_histogram.png', dpi=1200)
+            x = np.asarray([z for z in range(len(histogram))])
+
+            y_1 = histogram[:math.floor(len(histogram) / 2)]
+            x_1 = np.asarray([z for z in range(len(y_1))])
+            y_2 = histogram[math.floor(len(histogram) / 2):]
+            x_2 = np.asarray([z for z in range(len(y_2))])
+            try:
+                params_1, _ = optimize.curve_fit(gauss, x_1, y_1, method='trf')
+                params_2, _ = optimize.curve_fit(gauss, x_2, y_2, method='trf')
+            except RuntimeError:
+                # print('could not fit')
+                # plt.clf()
+                i += 1
+                continue
+
+            # cv2.namedWindow('component')
+            # cv2.imshow('component', component_image)
+            mu1, sigma1, A1 = params_1
+            mu2, sigma2, A2 = params_2
+            mu2 += math.floor((len(histogram) + 1) / 2)  # shift 2nd gaussian to 2nd half of the histogram
+
+            gauss_1 = ft.partial(gauss, mu=mu1, sigma=sigma1, A=A1)
+            gauss_2 = ft.partial(gauss, mu=mu2, sigma=sigma2, A=A2)
+            xs, _ = interpolated_intercepts(x, np.asarray([gauss_1(r) for r in x]),
+                                            np.asarray([gauss_2(r) for r in x]))
+            # print('xs=', xs)
+
+            # print('min_valley=', min_valley)
+            # plt.plot(x, gauss(x, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
+            # plt.plot(x, gauss(x, mu2, sigma2, A2),
+            #         color='blue', lw=3, label='gauss2')
+            # plt.plot(x, bimodal(x, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
+            # plt.savefig('plotted_gaussians.png', dpi=1200)
+
+            # cv2.destroyAllWindows()
+            # remove
+            total_segmented += 1
+            range_to_remove = 2
+            for item in xs:
+                min_valley = np.int32(item[0])
+                for j in range(-range_to_remove, range_to_remove):
+                    y_to_remove = min_y + min_valley + j
+                    cropped_y_to_remove = min_valley + j
+                    indices_to_remove = [index for index in component_indexes if index[0] == y_to_remove]
+                    for idx in range(component_image.shape[1]):
+                        if np.any(component_image[cropped_y_to_remove, idx] != 0):
+                            component_image[cropped_y_to_remove, idx] = (255, 255, 255)
+                    for index in indices_to_remove:
+                        image[index] = 0
+                        to_view[index] = (255, 255, 255)
+            # cv2.imwrite('after_component_image.png', component_image)
+            # plt.legend()
             # plt.show()
-            # min_idx = np.argmin(histogram)
-            RANGE_TO_REMOVE = 2
-            for j in range(-RANGE_TO_REMOVE, RANGE_TO_REMOVE):
-                y_to_remove = min_y + min_valley + j
-                indices_to_remove = [index for index in component_indexes if index[0] == y_to_remove]
-                # print('indices_to_remove=', indices_to_remove)
-                for index in indices_to_remove:
-                    image[index] = 0
-                    to_view[index] = (255, 255, 255)
+            # plt.clf()
+
         i += 1
-    # cv2.imwrite('image_' + str(itr) + '.png', image * 255)
-    # cv2.namedWindow('to_view', cv2.WINDOW_NORMAL)
-    # cv2.imshow('to_view', to_view)
-    # cv2.waitKey()
-    # cv2.destroyAllWindows()
-    # exit()
-    return image, to_view
+    print('total_segmented=', total_segmented)
+    # cv2.imwrite('DISCONNECTED.png', to_view)
+    return image, to_view, before_splitting
 
 
 # ---------------------------------------------------------------------------------
@@ -254,6 +392,10 @@ def pre_process(path, file_name, str_idx=''):
     # load image as gray-scale,
 
     image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+
+    x, y, w, h = cv2.boundingRect(image)
+    image = image[y + 1: y + h - 1, x + 1: x + w - 1]
+
     cv2.imwrite('./' + file_name + '/original_image.png', image)
     cv2.imwrite('./' + file_name + '/original_image_inverted.png', 255 - image)
     # image = cv2.erode(image, np.ones((3, 3), np.uint8), iterations=3)
@@ -292,44 +434,48 @@ def pre_process(path, file_name, str_idx=''):
 
     # split touching lines
     time_print(str_idx + 'split touching lines ...')
-    image_no_tiny_elements, to_view = split_touching_lines(image_no_tiny_elements)
-    cv2.imwrite('./' + file_name + '/remove_touching_lines.png', image_no_tiny_elements * 255)
-    cv2.imwrite('./' + file_name + '/clustered_remove_touching_lines.png', to_view)
-    # image_no_tiny_elements = split_touching_lines(image_no_tiny_elements, 2)
+    changed = True
+
+    image_no_tiny_elements, to_view, before_splitting = split_touching_lines(image_no_tiny_elements)
+    cv2.imwrite('./' + file_name + '/before_remove_touching_lines.png', before_splitting)
+    if to_view is None:
+            time_print(str_idx + 'NO lines need to be split!')
+    else:
+        time_print(str_idx + 'LINES SPLIT DONE!')
+        cv2.imwrite('./' + file_name + '/after_remove_touching_lines.png', to_view)
+        cv2.imwrite('./' + file_name + '/removed_touching_lines.png', image_no_tiny_elements * 255)
 
     # add white border around image of size 29
-    white_border_added_image = cv2.copyMakeBorder(image, 29, 29, 29, 29, cv2.BORDER_CONSTANT, None, 0)
+    white_border_added_image = cv2.copyMakeBorder(image, 39, 39, 39, 39, cv2.BORDER_CONSTANT, None, 0)
     for_view = copy.deepcopy(white_border_added_image)
-    white_border_added_image_no_tiny_elements = cv2.copyMakeBorder(image_no_tiny_elements, 29, 29, 29, 29,
+    white_border_added_image_no_tiny_elements = cv2.copyMakeBorder(image_no_tiny_elements, 39, 39, 39, 39,
                                                                    cv2.BORDER_CONSTANT, None, 0)
 
-    # add bounding box at distance 20 of black color around the complete text
-    # cv2.findNonZero(white_border_added_image, white_border_added_image)
-    x, y, w, h = cv2.boundingRect(white_border_added_image_no_tiny_elements)
-    cv2.rectangle(white_border_added_image, (x - 20, y - 20), (x + w + 20, y + h + 20), 1)
-    cv2.rectangle(white_border_added_image_no_tiny_elements, (x - 20, y - 20), (x + w + 20, y + h + 20), 1)
+    DIST_FROM_EDGES = 0
+    cv2.rectangle(white_border_added_image, (0, 0),
+                  (white_border_added_image.shape[1] - 1, white_border_added_image.shape[0] - 1), 1)
+    cv2.rectangle(white_border_added_image_no_tiny_elements, (0, 0),
+                  (white_border_added_image_no_tiny_elements.shape[1] - 1,
+                   white_border_added_image_no_tiny_elements.shape[0] - 1), 1)
+    cv2.imwrite('./' + file_name + '/rectangle_white_border_added_image_no_tiny_elements.png',
+                white_border_added_image_no_tiny_elements * 255)
 
     # TODO ANCHORS THAT ARE EDGE OF IMAGE - DUE TO THIS METHOD WE DONT DO THAT INSTEAD WE GIVE RECTANGLE CORNERS
     # excludes = [(0, 0), (skeleton.shape[1], 0), (0, skeleton.shape[0]), (skeleton.shape[1], skeleton.shape[0])]
     # these are the 4 anchors for the text found in the original image
     # anchors = [(x - 20, y - 20), (x + w + 20, y - 20), (x - 20, y + h + 20), (x + w + 20, y + h + 20)]
     # here we take ROI as the image
-    white_border_added_image_no_tiny_elements = white_border_added_image_no_tiny_elements[y - 20: y + h + 20, x - 20: x + w + 20]
+
+    print(white_border_added_image_no_tiny_elements.shape)
     # change anchors to 4 corners
     anchors = [(0, 0), (white_border_added_image_no_tiny_elements.shape[1], 0),
                (0, white_border_added_image_no_tiny_elements.shape[0]),
                (white_border_added_image_no_tiny_elements.shape[1], white_border_added_image_no_tiny_elements.shape[0])]
-    image_offset_values = (y - 20, x - 20)
-    # print('anchors=', anchors)
-    # on top of that add black border of size 1
-    for_view = cv2.copyMakeBorder(for_view, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 0)
-    black_border_added = cv2.copyMakeBorder(white_border_added_image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
-    black_border_added_no_tiny_elements = cv2.copyMakeBorder(white_border_added_image_no_tiny_elements,
-                                                             1, 1, 1, 1, cv2.BORDER_CONSTANT, None, 1)
+    image_offset_values = (y - DIST_FROM_EDGES, x - DIST_FROM_EDGES)
     # invert images (now black is black and white is white)
     for_view = 1 - for_view
-    black_border_added = 1 - black_border_added
-    black_border_added_no_tiny_elements = 1 - black_border_added_no_tiny_elements
+    black_border_added = 1 - white_border_added_image
+    black_border_added_no_tiny_elements = 1 - white_border_added_image_no_tiny_elements
 
     cv2.imwrite('./' + file_name + '/preprocessed_image.png', black_border_added * 255)
     cv2.imwrite('./' + file_name + '/preprocessed_image_inverted.png', 255 - black_border_added * 255)
@@ -1517,4 +1663,5 @@ if __name__ == "__main__":
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./data/', './results/')
         execute('./data/', './results/')
-
+        # execute_parallel('./CSG18_data/', './CSG18_results/')
+        # execute_parallel('./CB55_data/', './CB55_results/')
