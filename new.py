@@ -245,7 +245,7 @@ def split_touching_lines(image):
 
     if max_cluster_index is None:
         # print('No touching lines to be split!')
-        return image, None, None
+        return image, None, None, 0
 
     # to_view = cv2.cvtColor(np.zeros_like(labels, np.uint8), cv2.COLOR_GRAY2RGB)
     # i = 1
@@ -347,7 +347,7 @@ def split_touching_lines(image):
             #     xs = xs[1:]
             # TODO Think how to try and split the split images again. maybe another fit can be done?
             # TODO check height of each part in comparison to 2nd cluster size?! !
-            
+
             for item in xs:
                 min_valley = np.int32(item[0])
                 if histogram[min_valley] > np.max(histogram) * 0.5:
@@ -408,7 +408,7 @@ def pre_process(path, file_name, str_idx=''):
 
         cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), data_list), 0)
                          for i in range(n_clusters)]
-        minimum_cluster = np.argmin([c[1]/c[0] for c in zip(cluster_size, cluster_total)])
+        minimum_cluster = np.argmin([c[1]/c[0] if c[0] > 0 else 9999 for c in zip(cluster_size, cluster_total)])
         minimum_cluster_size = cluster_size.count(minimum_cluster)
         # THIS IS A THRESHOLD
         # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
