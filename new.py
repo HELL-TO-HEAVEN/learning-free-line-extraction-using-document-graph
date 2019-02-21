@@ -345,6 +345,9 @@ def split_touching_lines(image):
             # this to make sure the distance between the two suggested points is high enough
             # if len(xs) > 1 and xs[0][0] - xs[1][0] < 0.9 * len(histogram) / 2:
             #     xs = xs[1:]
+            # TODO Think how to try and split the split images again. maybe another fit can be done?
+            # TODO check height of each part in comparison to 2nd cluster size?! !
+            
             for item in xs:
                 min_valley = np.int32(item[0])
                 if histogram[min_valley] > np.max(histogram) * 0.5:
@@ -463,11 +466,11 @@ def pre_process(path, file_name, str_idx=''):
     all_images = [copy.deepcopy(image_no_tiny_elements) for i in range(10)]
     all_attempts = [split_touching_lines(img) for img in all_images]
     all_removals = [all_attempts[i][3] for i in range(10)]
-    image_no_tiny_attempt, to_view, before_splitting, total_segmented = all_attempts[np.argmax(all_removals)]
+    image_no_tiny_elements, to_view, before_splitting, total_segmented = all_attempts[np.argmax(all_removals)]
     if to_view is None:
         time_print(str_idx + 'No touching lines need to be split!')
     else:
-        time_print(str_idx + 'LINES SPLIT DONE!')
+        time_print(str_idx + 'LINES SPLIT DONE! REMOVED= ' + str(total_segmented))
         cv2.imwrite('./' + file_name + '/before_remove_touching_lines_.png', before_splitting)
         cv2.imwrite('./' + file_name + '/after_remove_touching_lines_.png', to_view)
         cv2.imwrite('./' + file_name + '/removed_touching_lines_.png', image_no_tiny_elements * 255)
@@ -1507,35 +1510,44 @@ def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
             two_links = [link for link in combined_graph.keys() if vertex in link]
             if len(two_links) == 2:
                 link_1, link_2 = two_links
-                pixels_1 = combined_graph.pop(link_1)
-                pixels_2 = combined_graph.pop(link_2)
                 if link_1[0] == link_2[0]:
-                    new_edge = (link_1[1], link_2[1])
+                    u = link_1[1]
+                    w = link_2[1]
+                    v = link_1[0]
                 elif link_1[0] == link_2[1]:
-                    new_edge = (link_1[1], link_2[0])
+                    u = link_1[1]
+                    w = link_2[0]
+                    v = link_1[0]
                 elif link_1[1] == link_2[0]:
-                    new_edge = (link_1[0], link_2[1])
+                    u = link_1[0]
+                    w = link_2[1]
+                    v = link_1[1]
                 else:
-                    new_edge = (link_1[0], link_2[0])
-                # print('two_links=', two_links, 'new_edge=', new_edge)
-                combined_graph[new_edge] = list(set(pixels_1 + pixels_2))
-                done = False
-                break
+                    u = link_1[0]
+                    w = link_2[0]
+                    v = link_1[1]
+                new_edge = (u, w)
+                if np.abs(np.pi - calculate_abs_angle(u, v, w)) < threshold:
+                    pixels_1 = combined_graph.pop(link_1)
+                    pixels_2 = combined_graph.pop(link_2)
+                    combined_graph[new_edge] = list(set(pixels_1 + pixels_2))
+                    done = False
+                    break
 
     all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
     vertexes = list(set(all_vertexes))
-    cv2.namedWindow('edge')
-    for vertex in vertexes:
-        two_links = [link for link in combined_graph.keys() if vertex in link]
-        print(len(two_links), 'vertex=', two_links)
-        image_unmodified = cv2.cvtColor(np.zeros([833, 1172], np.uint8), cv2.COLOR_GRAY2RGB)
-        edge_list = combined_graph[two_links[0]]
-        image_unmodified = overlay_edges(image_unmodified, edge_list, (255, 0, 0))
-        image_unmodified[two_links[0][0]] = (255, 255, 255)
-        image_unmodified[two_links[0][1]] = (255, 255, 255)
-        cv2.imshow('edge', image_unmodified)
-        cv2.waitKey()
-    cv2.destroyAllWindows()
+    # cv2.namedWindow('edge')
+    # for vertex in vertexes:
+        # two_links = [link for link in combined_graph.keys() if vertex in link]
+        # print(len(two_links), 'vertex=', two_links)
+        # image_unmodified = cv2.cvtColor(np.zeros([833, 1172], np.uint8), cv2.COLOR_GRAY2RGB)
+        # edge_list = combined_graph[two_links[0]]
+        # image_unmodified = overlay_edges(image_unmodified, edge_list, (255, 0, 0))
+        # image_unmodified[two_links[0][0]] = (255, 255, 255)
+        # image_unmodified[two_links[0][1]] = (255, 255, 255)
+        # cv2.imshow('edge', image_unmodified)
+        # cv2.waitKey()
+    # cv2.destroyAllWindows()
 
     # add back bridges following this rule: if (u,v) and (w,z) are two edges in combined_graph
     # check if deg(v)=1 and deg(w)=1 and (v,w) \in only_bridges
