@@ -80,6 +80,8 @@ def interpolated_intercepts(x, y1, y2):
 # draw_edges(edges, edge_dictionary, image, color):
 def draw_edges(edges, edge_dictionary, image, color, image_offset_values=None):
     for edge in edges:
+        if edge not in edge_dictionary.keys():
+            continue
         edge_list = edge_dictionary[edge]
         if image_offset_values is not None:
             offset_edge_list = [(e[0]+image_offset_values[0], e[1]+image_offset_values[1]) for e
@@ -226,12 +228,12 @@ def split_touching_lines(image):
         # print('maxCluster=', max_cluster)
         # print('heights=', cluster_average_sizes)
         ratios = [(cluster_average_sizes[z] / cluster_average_sizes[max_cluster])[0] for z in range(n_clusters)]
-        print('ratios=', ratios)
+        # print('ratios=', ratios)
         ratios[np.argmax(ratios)] = -1
         second_cluster = ratios[np.argmax(ratios)]
         # print('second_cluster=', second_cluster)
         # print('max_cluster=', max_cluster)
-        print('second_cluster=', np.argmax(ratios))
+        # print('second_cluster=', np.argmax(ratios))
         if 0.325 <= second_cluster <= 0.675:
             return y_k_means, max_cluster
         else:
@@ -266,7 +268,7 @@ def split_touching_lines(image):
     before_splitting = copy.deepcopy(to_view)
     i = 1
     total_segmented = 0
-    print('components to be checked: ', len(clustered))
+    # print('components to be checked: ', len(clustered))
     # print('clustered=', clustered)
     for component in clustered:
         component_image = np.zeros_like(image)
@@ -380,9 +382,8 @@ def split_touching_lines(image):
             # plt.clf()
 
         i += 1
-    print('total_segmented=', total_segmented)
-    # cv2.imwrite('DISCONNECTED.png', to_view)
-    return image, to_view, before_splitting
+    # print('total_segmented=', total_segmented)
+    return image, to_view, before_splitting, total_segmented
 
 
 # ---------------------------------------------------------------------------------
@@ -394,11 +395,12 @@ def pre_process(path, file_name, str_idx=''):
         data_list = [stat[5] for stat in all_stats]
         # print('data_list=', data_list)
         data = np.asarray(data_list).reshape(-1, 1)
-        k_means = KMeans(n_clusters=n_clusters)
+        # k_means = KMeans(n_clusters=n_clusters)
+        k_means = GaussianMixture(n_components=n_clusters)
         k_means.fit(data)
         y_k_means = k_means.predict(data)
 
-        cluster_size = [len(list(filter(lambda x: x == i, y_k_means))) for i in range(n_clusters)]
+        cluster_size = [len(list(filter(lambda x0: x0 == i, y_k_means))) for i in range(n_clusters)]
         total = sum(cluster_size)
 
         cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), data_list), 0)
@@ -457,15 +459,18 @@ def pre_process(path, file_name, str_idx=''):
 
     # split touching lines
     time_print(str_idx + 'split touching lines ...')
-    image_no_tiny_elements, to_view, before_splitting = split_touching_lines(image_no_tiny_elements)
 
+    all_images = [copy.deepcopy(image_no_tiny_elements) for i in range(10)]
+    all_attempts = [split_touching_lines(img) for img in all_images]
+    all_removals = [all_attempts[i][3] for i in range(10)]
+    image_no_tiny_attempt, to_view, before_splitting, total_segmented = all_attempts[np.argmax(all_removals)]
     if to_view is None:
-            time_print(str_idx + 'No touching lines need to be split!')
+        time_print(str_idx + 'No touching lines need to be split!')
     else:
         time_print(str_idx + 'LINES SPLIT DONE!')
-        cv2.imwrite('./' + file_name + '/before_remove_touching_lines.png', before_splitting)
-        cv2.imwrite('./' + file_name + '/after_remove_touching_lines.png', to_view)
-        cv2.imwrite('./' + file_name + '/removed_touching_lines.png', image_no_tiny_elements * 255)
+        cv2.imwrite('./' + file_name + '/before_remove_touching_lines_.png', before_splitting)
+        cv2.imwrite('./' + file_name + '/after_remove_touching_lines_.png', to_view)
+        cv2.imwrite('./' + file_name + '/removed_touching_lines_.png', image_no_tiny_elements * 255)
 
     # add white border around image of size 29
     white_border_added_image = cv2.copyMakeBorder(image, 39, 39, 39, 39, cv2.BORDER_CONSTANT, None, 0)
@@ -1264,18 +1269,9 @@ def overlay_and_save(bridges, links, rest, edge_dictionary, image_preprocessed, 
 # ---------------------------------------------------------------------------------
 #
 def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_type, image_offset_values):
-    # in greedy manner: find junction in v_scores where u,v v,w1 v,w2 has minimum T score
-    # mark u,v as Bridge
-    # mark v,w1 and v,w2 as Link
-    # TODO OPTION 1 - 100% greedy - and remove conflicts on the go
-    # remove all u,v from v_scores marked as L
-    # remove all v,w1 and v,w2 from v_scores marked as B
-    # TODO OPTION 2 - each time check for conflicts, and mark as such
-    # add junction to B and L lists
-    # check whether new min junction
     bridges = set()
     links = set()
-
+    use_later = set()
     index = 1
     while t_scores:
         if index % 500 == 0:
@@ -1306,8 +1302,8 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
         # add to links - CHECK FOR CONFLICT
         two_links = [item for item in t_scores[min_score_key] if item is not min_score]
         # print('two_links=', two_links)
-        # add new links to links set
 
+        # add new links to links set
         if new_bridge not in links:
             bridges.add(new_bridge)
             for link in two_links:
@@ -1321,7 +1317,7 @@ def greedy_classification(t_scores, edge_dictionary, skeleton, file_name, score_
         # remove minimum t score junction from t_scores
         t_scores.pop(min_score_key)
         # print('B=', bridges, 'L=', links)
-    print()
+    # print()
     skeleton = skeleton.astype(np.uint8)
 
     # find anchor edges
@@ -1384,7 +1380,7 @@ def create_v_scores(t_scores, l_scores):
 # ---------------------------------------------------------------------------------
 #
 def combine_edges(bridges, links, rest, edge_dictionary):
-    def merge_group(candidate_links, edge_dict, adj_list, anchors, threshold=np.pi / 3):
+    def merge_group(candidate_edges, edge_dict, adj_list, anchors, threshold=np.pi / 3):
         # we combine two links as one if angle between them is minimum
         done = False
         while not done:
@@ -1392,10 +1388,11 @@ def combine_edges(bridges, links, rest, edge_dictionary):
             merge_link_1 = []
             merge_link_2 = []
             merge_angles = 0
-            for link in candidate_links:
+            # in find the 'best' two links for merge - those that have highest angle of all
+            for link in candidate_edges:
                 u, v = link
                 # print('link=', link)
-                neighbors = [l for l in candidate_links if v in l and u not in l]
+                neighbors = [l for l in candidate_edges if v in l and u not in l]
                 real_neighbors = [e if e not in adj_list.keys() else adj_list[e] for e in neighbors]
                 # print('neighbors=', neighbors)
                 if real_neighbors:
@@ -1403,49 +1400,33 @@ def combine_edges(bridges, links, rest, edge_dictionary):
                     # print('angles=', angles)
                     max_index = np.argmax(angles)
                     max_neighbor = real_neighbors[max_index]
-                    if angles[max_index] > merge_angles:
+                    is_anchor = False
+                    # if we reached anchor points we skip
+                    for coord in [coord for e in anchors for coord in e]:
+                        if coord in link and coord in max_neighbor:
+                            is_anchor = True
+                            break
+                    if not is_anchor and angles[max_index] > merge_angles:
                         merge_angles = angles[max_index]
                         merge_link_1 = link
                         merge_link_2 = max_neighbor
-                # print('------------------------')
-
-            # if we reached anchor points we do not merge them. we stop.
-            found = False
-            for coord in [coord for edge in anchors for coord in edge]:
-                if coord in merge_link_1 and coord in merge_link_2:
-                    found = True
-            if found:
-                continue
 
             # now we merge 'best' candidates together modifying the document graph
             if merge_link_1 and np.abs(np.pi - merge_angles) < threshold:
-                # print('link_1=', merge_link_1, 'link_2=', merge_link_2, 'angle=', merge_angles)
+
                 done = False
                 pixels_1 = edge_dict.pop(merge_link_1)
                 pixels_2 = edge_dict.pop(merge_link_2)
-                candidate_links = [e for e in candidate_links if e != merge_link_1 and e != merge_link_2]
+
                 # print('pixels_1=', pixels_1)
                 # print('pixels_2=', pixels_2)
-
                 new_edge = (merge_link_1[0], merge_link_2[0] if merge_link_2[0] != merge_link_1[1] else merge_link_2[1])
-                # TODO IN CASE NOT IN ADJ LIST:
-                n_u, n_w = new_edge
-                # find u, v , w
-                # set v as adjacent for u and for w (2 entries)
-                # TODO IN CASE IN ADJ LIST:
-                # UPDATE ADJ LIST TO NEW ADJACENCY
-                # if u not in adj_list.keys():
+                edge_dict[new_edge] = list(set(pixels_1 + pixels_2))
+                candidate_edges = [e for e in candidate_edges if e != merge_link_1 and e != merge_link_2]
+                candidate_edges.append(new_edge)
+                # print('link_1=', merge_link_1, 'link_2=', merge_link_2, 'new_edge=', new_edge)
 
-                new_pixels = list(set([*pixels_1, *pixels_2]))
-                # print('new_pixels=', new_pixels)
-
-                edge_dict[new_edge] = new_pixels
-                candidate_links.append(new_edge)
-
-                # print('------------------------')
-                # print(len(pixels_1), len(pixels_2), len(new_pixels))
-                # print('------------------------')
-        return candidate_links, edge_dict, adj_list
+        return candidate_edges, edge_dict, adj_list
 
     # draw_graph_edges(edge_dictionary, res, 'before', wait_flag=False, overlay=True)
 
@@ -1454,22 +1435,33 @@ def combine_edges(bridges, links, rest, edge_dictionary):
     definite_links = [e for e in links if e not in bridges]
     adjacency_list = dict()
 
+    image_unmodified = cv2.cvtColor(np.zeros([833, 1172], np.uint8), cv2.COLOR_GRAY2RGB)
+    # for edge in edge_dictionary.keys():
+    #     edge_list = edge_dictionary[edge]
+    #     image_unmodified = overlay_edges(image_unmodified, edge_list, (255, 0, 0))
+    # cv2.imwrite('zero.png', image_unmodified)
+
     # remove bridges from graph that are not marked as conflict
     only_bridges = [bridge for bridge in bridges if bridge not in can_be_both]
+    use_later = dict()
     for bridge in only_bridges:
-        edge_dictionary.pop(bridge)
+        use_later[bridge] = edge_dictionary.pop(bridge)
+
+    # image_unmodified = cv2.cvtColor(np.zeros([833, 1172], np.uint8), cv2.COLOR_GRAY2RGB)
+    # for edge in edge_dictionary.keys():
+    #     if edge[0] == edge[1]:
+    #         print('[start] ERROR:', edge)
+    #     edge_list = edge_dictionary[edge]
+    #     image_unmodified = overlay_edges(image_unmodified, edge_list, (255, 0, 0))
+    # cv2.imwrite('start.png', image_unmodified)
 
     # combine edges - first iteration for link edges
     definite_links, edge_dictionary, adjacency_list = merge_group(definite_links, edge_dictionary, adjacency_list, rest)
+
     both = definite_links + can_be_both
     # combine edges - second iteration, now we include conflict edges
     both, edge_dictionary, adjacency_list = merge_group(both, edge_dictionary, adjacency_list, rest,
                                                         threshold=np.pi / 5)
-
-    # res = overlay_and_save(bridges, both, rest, edge_dictionary, image_unmodified, 'classified', 'v_scores')
-    # cv2.imwrite('classified.png', res)
-    # res = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    # draw_graph_edges(edge_dictionary, res, 'final_result', wait_flag=False, overlay=True)
 
     # remove bridges from document graph that were not used in conflict stage
     only_bridges = [bridge for bridge in bridges if bridge in edge_dictionary.keys()]
@@ -1477,13 +1469,13 @@ def combine_edges(bridges, links, rest, edge_dictionary):
     for bridge in only_bridges:
         bridges_dict[bridge] = edge_dictionary.pop(bridge)
 
-    return bridges_dict, edge_dictionary
+    return bridges_dict, edge_dictionary, use_later
 
 
 # ---------------------------------------------------------------------------------
 # finalize_graph - remove wrong direction edges - and combine edges of two degree vertexes
 # text_angle is text direction relative to x axis
-def finalize_graph(combined_graph, only_bridges, anchors, text_angle=0, threshold=np.pi / 4):
+def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
     def calc_angle(edge):
         u_e, v_e = edge
         # print('u=', u, 'v=', v)
@@ -1505,15 +1497,59 @@ def finalize_graph(combined_graph, only_bridges, anchors, text_angle=0, threshol
     for candidate in set(remove_candidates + anchor_edges):
         combined_graph.pop(candidate)
 
+    # merge two degree vertexes
+    done = False
+    while not done:
+        all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
+        vertexes = list(set(all_vertexes))
+        done = True
+        for vertex in vertexes:
+            two_links = [link for link in combined_graph.keys() if vertex in link]
+            if len(two_links) == 2:
+                link_1, link_2 = two_links
+                pixels_1 = combined_graph.pop(link_1)
+                pixels_2 = combined_graph.pop(link_2)
+                if link_1[0] == link_2[0]:
+                    new_edge = (link_1[1], link_2[1])
+                elif link_1[0] == link_2[1]:
+                    new_edge = (link_1[1], link_2[0])
+                elif link_1[1] == link_2[0]:
+                    new_edge = (link_1[0], link_2[1])
+                else:
+                    new_edge = (link_1[0], link_2[0])
+                # print('two_links=', two_links, 'new_edge=', new_edge)
+                combined_graph[new_edge] = list(set(pixels_1 + pixels_2))
+                done = False
+                break
+
+    all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
+    vertexes = list(set(all_vertexes))
+    cv2.namedWindow('edge')
+    for vertex in vertexes:
+        two_links = [link for link in combined_graph.keys() if vertex in link]
+        print(len(two_links), 'vertex=', two_links)
+        image_unmodified = cv2.cvtColor(np.zeros([833, 1172], np.uint8), cv2.COLOR_GRAY2RGB)
+        edge_list = combined_graph[two_links[0]]
+        image_unmodified = overlay_edges(image_unmodified, edge_list, (255, 0, 0))
+        image_unmodified[two_links[0][0]] = (255, 255, 255)
+        image_unmodified[two_links[0][1]] = (255, 255, 255)
+        cv2.imshow('edge', image_unmodified)
+        cv2.waitKey()
+    cv2.destroyAllWindows()
+
     # add back bridges following this rule: if (u,v) and (w,z) are two edges in combined_graph
     # check if deg(v)=1 and deg(w)=1 and (v,w) \in only_bridges
     # then remove (u,v) remove (w,z) add (u,z) instead
     done = False
     # print('only_bridges_total=', len(only_bridges.keys()))
+    # print('combined_graph.keys=', combined_graph.keys())
+    # print('------------------------------')
+    # print('only_bridges.keys=', only_bridges.keys())
     while not done:
         done = True
         for bridge in only_bridges.keys():
             v, w = bridge
+            # print('v=', v, 'w=', w)
             link_1 = [link for link in combined_graph.keys() if v in link]
             link_2 = [link for link in combined_graph.keys() if w in link]
             # print('link_1=', link_1)
@@ -1525,25 +1561,10 @@ def finalize_graph(combined_graph, only_bridges, anchors, text_angle=0, threshol
                 pixels_3 = only_bridges[bridge]
                 new_edge = (link_1[0][0] if link_1[0][0] != v else link_1[0][1],
                             link_2[0][0] if link_2[0][0] != w else link_2[0][1])
-                combined_graph[new_edge] = pixels_1 + pixels_2 + pixels_3
+                combined_graph[new_edge] = list(set(pixels_1 + pixels_2 + pixels_3))
                 done = False
                 break
 
-    # merge two degree vertexes
-    done = False
-    while not done:
-        all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
-        vertexes = list(set(all_vertexes))
-        done = True
-        for vertex in vertexes:
-            two_links = [link for link in combined_graph.keys() if vertex in link]
-            if len(two_links) == 2:
-                pixels_1 = combined_graph.pop(two_links[0])
-                pixels_2 = combined_graph.pop(two_links[1])
-                new_edge = (two_links[0][0], two_links[1][0] if two_links[1][0] != two_links[0][1] else two_links[1][1])
-                combined_graph[new_edge] = pixels_1 + pixels_2
-                done = False
-                break
     return combined_graph
 
 
@@ -1590,16 +1611,17 @@ def execute(input_path, output_path):
         res_finalization = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
 
         time_print('combining graph edges ...')
-        only_bridges, combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
+        only_bridges, combined_graph, use_later = combine_edges(bridges, links, rest, edge_dictionary)
 
         draw_graph_edges(combined_graph, res_no_finalization, file_name, wait_flag=False, overlay=True,
                          image_offset_values=image_offset_values, file_name='final_result_no_finalize')
 
         time_print('finalizing document graph ...')
-        finalized_combined_graph = finalize_graph(combined_graph, only_bridges, anchors)
+
+        finalized_combined_graph = finalize_graph(combined_graph, use_later, anchors)
 
         name = draw_graph_edges(finalized_combined_graph, res_finalization, file_name, wait_flag=False, overlay=True,
-                         image_offset_values=image_offset_values, file_name='final_result_finalize')
+                                image_offset_values=image_offset_values, file_name='final_result_finalize')
 
         # result = draw_graph_edges(combined_graph, cv2.cvtColor(res, cv2.COLOR_RGB2GRAY), file_name, wait_flag=False,
         # overlay=False)
