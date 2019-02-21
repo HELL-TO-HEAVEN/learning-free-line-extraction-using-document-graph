@@ -226,12 +226,13 @@ def split_touching_lines(image):
         # print('maxCluster=', max_cluster)
         # print('heights=', cluster_average_sizes)
         ratios = [(cluster_average_sizes[z] / cluster_average_sizes[max_cluster])[0] for z in range(n_clusters)]
-        # print('ratios=', ratios)
+        print('ratios=', ratios)
         ratios[np.argmax(ratios)] = -1
         second_cluster = ratios[np.argmax(ratios)]
         # print('second_cluster=', second_cluster)
         # print('max_cluster=', max_cluster)
-        if second_cluster <= 0.60:
+        print('second_cluster=', np.argmax(ratios))
+        if 0.325 <= second_cluster <= 0.675:
             return y_k_means, max_cluster
         else:
             return y_k_means, None
@@ -241,7 +242,7 @@ def split_touching_lines(image):
     clustered, max_cluster_index = cluster_elements(heights)
 
     if max_cluster_index is None:
-        print('No touching lines to be split!')
+        # print('No touching lines to be split!')
         return image, None, None
 
     # to_view = cv2.cvtColor(np.zeros_like(labels, np.uint8), cv2.COLOR_GRAY2RGB)
@@ -338,19 +339,41 @@ def split_touching_lines(image):
             # cv2.destroyAllWindows()
             # remove
             total_segmented += 1
-            range_to_remove = 2
+            range_to_remove = 15
+            # this to make sure the distance between the two suggested points is high enough
+            # if len(xs) > 1 and xs[0][0] - xs[1][0] < 0.9 * len(histogram) / 2:
+            #     xs = xs[1:]
             for item in xs:
                 min_valley = np.int32(item[0])
-                for j in range(-range_to_remove, range_to_remove):
-                    y_to_remove = min_y + min_valley + j
-                    cropped_y_to_remove = min_valley + j
-                    indices_to_remove = [index for index in component_indexes if index[0] == y_to_remove]
-                    for idx in range(component_image.shape[1]):
-                        if np.any(component_image[cropped_y_to_remove, idx] != 0):
-                            component_image[cropped_y_to_remove, idx] = (255, 255, 255)
-                    for index in indices_to_remove:
-                        image[index] = 0
-                        to_view[index] = (255, 255, 255)
+                if histogram[min_valley] > np.max(histogram) * 0.5:
+                    continue
+                ranges = [range(-range_to_remove, 0), range(0, range_to_remove)]
+                for one_range in ranges:
+                    for j in one_range:
+                        y_to_remove = min_y + min_valley + j
+                        cropped_y_to_remove = min_valley + j
+                        indices_to_remove = [index for index in component_indexes if index[0] == y_to_remove]
+                        if len(indices_to_remove) == 0:
+                            continue
+                        for idx in range(component_image.shape[1]):
+                            try:
+                                if np.any(component_image[cropped_y_to_remove, idx] != 0):
+                                    component_image[cropped_y_to_remove, idx] = (255, 255, 255)
+                            except IndexError as e:
+                                print(str(e))
+                        # print(indices_to_remove)
+                        most_left = np.min([index[1] for index in indices_to_remove])
+                        # print('most_left=', most_left)
+                        most_right = np.max([index[1] for index in indices_to_remove])
+                        # print('most_right=', most_right)
+                        # print('distance to remove=', most_right - most_left)
+                        # print('total=', component_image.shape[1])
+                        if most_right - most_left > 0.5 * component_image.shape[1]\
+                                and len(indices_to_remove) > 0.5 * np.max(histogram):
+                            break
+                        for index in indices_to_remove:
+                            image[index] = 0
+                            to_view[index] = (255, 255, 255)
             # cv2.imwrite('after_component_image.png', component_image)
             # plt.legend()
             # plt.show()
@@ -434,14 +457,13 @@ def pre_process(path, file_name, str_idx=''):
 
     # split touching lines
     time_print(str_idx + 'split touching lines ...')
-    changed = True
-
     image_no_tiny_elements, to_view, before_splitting = split_touching_lines(image_no_tiny_elements)
-    cv2.imwrite('./' + file_name + '/before_remove_touching_lines.png', before_splitting)
+
     if to_view is None:
-            time_print(str_idx + 'NO lines need to be split!')
+            time_print(str_idx + 'No touching lines need to be split!')
     else:
         time_print(str_idx + 'LINES SPLIT DONE!')
+        cv2.imwrite('./' + file_name + '/before_remove_touching_lines.png', before_splitting)
         cv2.imwrite('./' + file_name + '/after_remove_touching_lines.png', to_view)
         cv2.imwrite('./' + file_name + '/removed_touching_lines.png', image_no_tiny_elements * 255)
 
@@ -451,7 +473,6 @@ def pre_process(path, file_name, str_idx=''):
     white_border_added_image_no_tiny_elements = cv2.copyMakeBorder(image_no_tiny_elements, 39, 39, 39, 39,
                                                                    cv2.BORDER_CONSTANT, None, 0)
 
-    DIST_FROM_EDGES = 0
     cv2.rectangle(white_border_added_image, (0, 0),
                   (white_border_added_image.shape[1] - 1, white_border_added_image.shape[0] - 1), 1)
     cv2.rectangle(white_border_added_image_no_tiny_elements, (0, 0),
@@ -465,13 +486,21 @@ def pre_process(path, file_name, str_idx=''):
     # these are the 4 anchors for the text found in the original image
     # anchors = [(x - 20, y - 20), (x + w + 20, y - 20), (x - 20, y + h + 20), (x + w + 20, y + h + 20)]
     # here we take ROI as the image
-
-    print(white_border_added_image_no_tiny_elements.shape)
+    # cv2.namedWindow('before')
+    # cv2.imshow('before', white_border_added_image_no_tiny_elements * 255)
+    x, y, w, h = cv2.boundingRect(white_border_added_image_no_tiny_elements)
+    # print(white_border_added_image_no_tiny_elements.shape)
+    white_border_added_image_no_tiny_elements = white_border_added_image_no_tiny_elements[y: y + h, x: x + w]
+    # print(white_border_added_image_no_tiny_elements.shape)
+    # cv2.namedWindow('after')
+    # cv2.imshow('after', white_border_added_image_no_tiny_elements * 255)
+    # cv2.waitKey()
+    #exit()
     # change anchors to 4 corners
     anchors = [(0, 0), (white_border_added_image_no_tiny_elements.shape[1], 0),
                (0, white_border_added_image_no_tiny_elements.shape[0]),
                (white_border_added_image_no_tiny_elements.shape[1], white_border_added_image_no_tiny_elements.shape[0])]
-    image_offset_values = (y - DIST_FROM_EDGES, x - DIST_FROM_EDGES)
+    image_offset_values = (y, x)
     # invert images (now black is black and white is white)
     for_view = 1 - for_view
     black_border_added = 1 - white_border_added_image
@@ -1647,7 +1676,7 @@ def execute_parallel(input_path, output_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=22)
+    pool = ProcessPoolExecutor(max_workers=11)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path, output_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     i = 0
