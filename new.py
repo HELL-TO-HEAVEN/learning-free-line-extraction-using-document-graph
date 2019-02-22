@@ -16,13 +16,13 @@ import collections as col
 from skan import csr
 from os import listdir
 from scipy import optimize
+from scipy import integrate as intg
 from skimage import morphology
 from os.path import isfile, join
 from matplotlib import pyplot as plt
 from decimal import Decimal, getcontext
 
 from concurrent import futures
-from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from concurrent.futures import ProcessPoolExecutor
 
@@ -170,6 +170,243 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
 # for each connected component create histogram. each bin is row value count number of pixels
 # find three adjacent bins with min average of all, and remove them from image
 def split_touching_lines(image):
+    def get_n_cut_valleys(hist, n):
+        # plt.clf()
+        # plt.plot(histogram, color='black', label='hist')
+        # plt.xlim([0, len(hist)])
+        x_s = np.asarray([z for z in range(len(hist))])
+
+        # n gaussians fitting attempt
+        try:
+            piece = math.floor(len(hist) / n)
+            y_n = [hist[i_dx * piece: (i_dx + 1) * piece] for i_dx in range(0, n)]
+            x_n = [np.asarray([z for z in range(len(y_n[y_i_dx]))]) for y_i_dx in range(0, len(y_n))]
+            params_n = [optimize.curve_fit(gauss, x_i, y_i, method='trf')[0] for x_i, y_i in zip(x_n, y_n)]
+
+        except RuntimeError:
+            # print('could not fit')
+            # plt.clf()
+            return None
+
+        # append shift for mu_i
+        mu_n = [params_i[0] for params_i in params_n]
+        sigma_n = [params_i[1] for params_i in params_n]
+        A_n = [params_i[2] for params_i in params_n]
+        shift = math.floor((len(hist) + 1) / n)
+
+        mu_n = [mu_i + i_dx * shift for i_dx, mu_i in enumerate(mu_n)]
+        gauss_n = [ft.partial(gauss, mu=mu_i, sigma=sigma_i, A=A_i) for mu_i, sigma_i, A_i in
+                   zip(mu_n, sigma_n, A_n)]
+
+        good_n = [intg.quad(gauss_i, 0, len(hist), args=())[0] / intg.quad(gauss_i, -np.inf, np.inf, args=())[0] > 0.9
+                  for gauss_i in gauss_n]
+        result = []
+        for i_dx in range(0, len(good_n) - 1):
+            if good_n[i_dx] and good_n[i_dx + 1]:
+                gauss_1 = gauss_n[i_dx]
+                gauss_2 = gauss_n[i_dx + 1]
+                x_s_i, _ = interpolated_intercepts(x_s, np.asarray([gauss_1(r) for r in x_s]),
+                                                np.asarray([gauss_2(r) for r in x_s]))
+            else:
+                return None
+            for elem in x_s_i:
+                result.append(np.int32(elem))
+        return result
+        # plt.plot(x_s, gauss(x_s, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
+        # plt.plot(x_s, gauss(x_s, mu2, sigma2, A2), color='blue', lw=3, label='gauss2')
+        # plt.plot(x_s, gauss(x_s, mu3, sigma3, A3), color='red', lw=3, label='gauss3')
+        # plt.plot(x_s, gauss(x_s, mu4, sigma4, A4), color='yellow', lw=3, label='gauss4')
+        # plt.plot(x_s, bimodal(x_s, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
+        # plt.legend()
+        # plt.show()
+        # plt.clf()
+        # print('x_s_1=', x_s_1)
+        # print('x_s_2=', x_s_2)
+        # print('x_s_3=', x_s_3)
+
+    def get_four_cut_valleys(hist):
+        # plt.clf()
+        # plt.plot(histogram, color='black', label='hist')
+        # plt.xlim([0, len(hist)])
+        x_s = np.asarray([z for z in range(len(hist))])
+
+        # three gaussians fitting attempt
+        try:
+            y_1 = hist[:math.floor(len(hist) / 4)]
+            x_1 = np.asarray([z for z in range(len(y_1))])
+            y_2 = hist[math.floor(len(hist) / 4):2 * math.floor(len(hist) / 4):]
+            x_2 = np.asarray([z for z in range(len(y_2))])
+            y_3 = hist[2 * math.floor(len(hist) / 4):3 * math.floor(len(hist) / 4)]
+            x_3 = np.asarray([z for z in range(len(y_3))])
+            y_4 = hist[3 * math.floor(len(hist) / 4):]
+            x_4 = np.asarray([z for z in range(len(y_4))])
+            params_1, _ = optimize.curve_fit(gauss, x_1, y_1, method='trf')
+            params_2, _ = optimize.curve_fit(gauss, x_2, y_2, method='trf')
+            params_3, _ = optimize.curve_fit(gauss, x_3, y_3, method='trf')
+            params_4, _ = optimize.curve_fit(gauss, x_4, y_4, method='trf')
+        except RuntimeError:
+            # print('could not fit')
+            # plt.clf()
+            return None
+
+        # cv2.namedWindow('component')
+        # cv2.imshow('component', component_image)
+        mu1, sigma1, A1 = params_1
+        mu2, sigma2, A2 = params_2
+        mu3, sigma3, A3 = params_3
+        mu4, sigma4, A4 = params_4
+        mu2 += math.floor((len(hist) + 1) / 4)  # shift 2nd gaussian 2nd quarter of the histogram
+        mu3 += math.floor(2 * (len(hist) + 1) / 4)  # shift 3rd gaussian 3rd quarter of the histogram
+        mu4 += math.floor(3 * (len(hist) + 1) / 4)  # shift 4th gaussian 4th quarter of the histogram
+
+        gauss_1 = ft.partial(gauss, mu=mu1, sigma=sigma1, A=A1)
+        gauss_2 = ft.partial(gauss, mu=mu2, sigma=sigma2, A=A2)
+        gauss_3 = ft.partial(gauss, mu=mu3, sigma=sigma3, A=A3)
+        gauss_4 = ft.partial(gauss, mu=mu4, sigma=sigma4, A=A4)
+
+        good_1 = intg.quad(gauss_1, 0, len(hist), args=())[0] / intg.quad(gauss_1, -np.inf, np.inf, args=())[0] > 0.9
+        good_2 = intg.quad(gauss_2, 0, len(hist), args=())[0] / intg.quad(gauss_2, -np.inf, np.inf, args=())[0] > 0.9
+        good_3 = intg.quad(gauss_3, 0, len(hist), args=())[0] / intg.quad(gauss_3, -np.inf, np.inf, args=())[0] > 0.9
+        good_4 = intg.quad(gauss_4, 0, len(hist), args=())[0] / intg.quad(gauss_4, -np.inf, np.inf, args=())[0] > 0.9
+
+        if good_1 and good_2:
+            x_s_1, _ = interpolated_intercepts(x_s, np.asarray([gauss_1(r) for r in x_s]),
+                                               np.asarray([gauss_2(r) for r in x_s]))
+        else:
+            x_s_1 = None
+
+        if good_2 and good_3:
+            x_s_2, _ = interpolated_intercepts(x_s, np.asarray([gauss_2(r) for r in x_s]),
+                                               np.asarray([gauss_3(r) for r in x_s]))
+        else:
+            x_s_2 = None
+
+        if good_2 and good_4:
+            x_s_3, _ = interpolated_intercepts(x_s, np.asarray([gauss_3(r) for r in x_s]),
+                                               np.asarray([gauss_4(r) for r in x_s]))
+        else:
+            x_s_3 = None
+
+        # plt.plot(x_s, gauss(x_s, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
+        # plt.plot(x_s, gauss(x_s, mu2, sigma2, A2), color='blue', lw=3, label='gauss2')
+        # plt.plot(x_s, gauss(x_s, mu3, sigma3, A3), color='red', lw=3, label='gauss3')
+        # plt.plot(x_s, gauss(x_s, mu4, sigma4, A4), color='yellow', lw=3, label='gauss4')
+        # plt.plot(x_s, bimodal(x_s, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
+        # plt.legend()
+        # plt.show()
+        # plt.clf()
+        # print('x_s_1=', x_s_1)
+        # print('x_s_2=', x_s_2)
+        # print('x_s_3=', x_s_3)
+        if x_s_1 is None or x_s_2 is None or x_s_3 is None:
+            return None
+        else:
+
+            return np.concatenate((x_s_1, x_s_2, x_s_3))
+
+    def get_three_cut_valleys(hist):
+        # plt.clf()
+        # plt.plot(histogram, color='black', label='hist')
+        # plt.xlim([0, len(hist)])
+        x_s = np.asarray([z for z in range(len(hist))])
+
+        # three gaussians fitting attempt
+        try:
+            y_1 = hist[:math.floor(len(hist) / 3)]
+            x_1 = np.asarray([z for z in range(len(y_1))])
+            y_2 = hist[math.floor(len(hist) / 3):2 * math.floor(len(hist) / 3):]
+            x_2 = np.asarray([z for z in range(len(y_2))])
+            y_3 = hist[2 * math.floor(len(hist) / 3):]
+            x_3 = np.asarray([z for z in range(len(y_3))])
+            params_1, _ = optimize.curve_fit(gauss, x_1, y_1, method='trf')
+            params_2, _ = optimize.curve_fit(gauss, x_2, y_2, method='trf')
+            params_3, _ = optimize.curve_fit(gauss, x_3, y_3, method='trf')
+        except RuntimeError:
+            # print('could not fit')
+            # plt.clf()
+            return None
+
+        # cv2.namedWindow('component')
+        # cv2.imshow('component', component_image)
+        mu1, sigma1, A1 = params_1
+        mu2, sigma2, A2 = params_2
+        mu3, sigma3, A3 = params_3
+        mu2 += math.floor((len(hist) + 1) / 3)  # shift 2nd gaussian 3rd of the histogram
+        mu3 += math.floor(2 * (len(hist) + 1) / 3)  # shift 3nd gaussian 2 3rds of the histogram
+
+        gauss_1 = ft.partial(gauss, mu=mu1, sigma=sigma1, A=A1)
+        gauss_2 = ft.partial(gauss, mu=mu2, sigma=sigma2, A=A2)
+        gauss_3 = ft.partial(gauss, mu=mu3, sigma=sigma3, A=A3)
+
+        good_1 = intg.quad(gauss_1, 0, len(hist), args=())[0] / intg.quad(gauss_1, -np.inf, np.inf, args=())[0] > 0.9
+        good_2 = intg.quad(gauss_2, 0, len(hist), args=())[0] / intg.quad(gauss_2, -np.inf, np.inf, args=())[0] > 0.9
+        good_3 = intg.quad(gauss_3, 0, len(hist), args=())[0] / intg.quad(gauss_3, -np.inf, np.inf, args=())[0] > 0.9
+
+        if good_1 and good_2:
+            x_s_1, _ = interpolated_intercepts(x_s, np.asarray([gauss_1(r) for r in x_s]),
+                                               np.asarray([gauss_2(r) for r in x_s]))
+        else:
+            x_s_1 = None
+
+        if good_2 and good_3:
+            x_s_2, _ = interpolated_intercepts(x_s, np.asarray([gauss_2(r) for r in x_s]),
+                                               np.asarray([gauss_3(r) for r in x_s]))
+        else:
+            x_s_2 = None
+
+        # plt.plot(x_s, gauss(x_s, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
+        # plt.plot(x_s, gauss(x_s, mu2, sigma2, A2), color='blue', lw=3, label='gauss2')
+        # plt.plot(x_s, gauss(x_s, mu3, sigma3, A3), color='red', lw=3, label='gauss3')
+        # plt.plot(x_s, bimodal(x_s, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
+        # plt.legend()
+        # plt.show()
+        # plt.clf()
+        # print('x_s_1=', x_s_1)
+        # print('x_s_2=', x_s_2)
+        if x_s_1 is None or x_s_2 is None:
+            return None
+        else:
+            return np.concatenate((x_s_1, x_s_2))
+
+    def get_two_cut_valleys(hist):
+        # plt.plot(histogram, color='black', label='hist')
+        # plt.xlim([0, len(histogram)])
+        # plt.savefig('height_histogram.png', dpi=1200)
+        x_s = np.asarray([z for z in range(len(hist))])
+
+        # two gaussians fitting attempt
+        try:
+            y_1 = hist[:math.floor(len(hist) / 2)]
+            x_1 = np.asarray([z for z in range(len(y_1))])
+            y_2 = hist[math.floor(len(hist) / 2):]
+            x_2 = np.asarray([z for z in range(len(y_2))])
+            params_1, _ = optimize.curve_fit(gauss, x_1, y_1, method='trf')
+            params_2, _ = optimize.curve_fit(gauss, x_2, y_2, method='trf')
+
+        except RuntimeError:
+            # print('could not fit')
+            # plt.clf()
+            return None
+
+        mu1, sigma1, A1 = params_1
+        mu2, sigma2, A2 = params_2
+        mu2 += math.floor((len(hist) + 1) / 2)  # shift 2nd gaussian 3rd of the histogram
+
+        gauss_1 = ft.partial(gauss, mu=mu1, sigma=sigma1, A=A1)
+        gauss_2 = ft.partial(gauss, mu=mu2, sigma=sigma2, A=A2)
+
+        good_1 = intg.quad(gauss_1, 0, len(hist), args=())[0] / intg.quad(gauss_1, -np.inf, np.inf, args=())[0] > 0.9
+        good_2 = intg.quad(gauss_2, 0, len(hist), args=())[0] / intg.quad(gauss_2, -np.inf, np.inf, args=())[0] > 0.9
+
+
+        if good_1 and good_2:
+            x_s_1, _ = interpolated_intercepts(x_s, np.asarray([gauss_1(r) for r in x_s]),
+                                               np.asarray([gauss_2(r) for r in x_s]))
+        else:
+            x_s_1 = None
+
+        return x_s_1
+
     def gauss(x_value, mu, sigma, A):
         return A * pylab.exp(-(x_value - mu) ** 2 / 2 / sigma ** 2)
 
@@ -301,41 +538,20 @@ def split_touching_lines(image):
                 histogram[j] = y_indexes.count(y_val)
                 j += 1
 
-            # plt.plot(histogram, color='black', label='hist')
-            # plt.xlim([0, len(histogram)])
-            # plt.savefig('height_histogram.png', dpi=1200)
-            x = np.asarray([z for z in range(len(histogram))])
-
-            y_1 = histogram[:math.floor(len(histogram) / 2)]
-            x_1 = np.asarray([z for z in range(len(y_1))])
-            y_2 = histogram[math.floor(len(histogram) / 2):]
-            x_2 = np.asarray([z for z in range(len(y_2))])
-            try:
-                params_1, _ = optimize.curve_fit(gauss, x_1, y_1, method='trf')
-                params_2, _ = optimize.curve_fit(gauss, x_2, y_2, method='trf')
-            except RuntimeError:
-                # print('could not fit')
-                # plt.clf()
-                i += 1
+            candidate_xs = [get_n_cut_valleys(histogram, i) for i in range(2, 10)]
+            print('candidate_xs=', candidate_xs)
+            candidate_xs = list(filter(lambda elem: elem is not None, candidate_xs))
+            print('filtered_candidate_xs=', candidate_xs)
+            if len(candidate_xs) == 0:
                 continue
-
-            # cv2.namedWindow('component')
-            # cv2.imshow('component', component_image)
-            mu1, sigma1, A1 = params_1
-            mu2, sigma2, A2 = params_2
-            mu2 += math.floor((len(histogram) + 1) / 2)  # shift 2nd gaussian to 2nd half of the histogram
-
-            gauss_1 = ft.partial(gauss, mu=mu1, sigma=sigma1, A=A1)
-            gauss_2 = ft.partial(gauss, mu=mu2, sigma=sigma2, A=A2)
-            xs, _ = interpolated_intercepts(x, np.asarray([gauss_1(r) for r in x]),
-                                            np.asarray([gauss_2(r) for r in x]))
-            # print('xs=', xs)
+            all_xs = candidate_xs[-1]
+            print('all_xs=', all_xs)
 
             # print('min_valley=', min_valley)
-            # plt.plot(x, gauss(x, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
-            # plt.plot(x, gauss(x, mu2, sigma2, A2),
+            # plt.plot(x_s, gauss(x_s, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
+            # plt.plot(x_s, gauss(x_s, mu2, sigma2, A2),
             #         color='blue', lw=3, label='gauss2')
-            # plt.plot(x, bimodal(x, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
+            # plt.plot(x_s, bimodal(x_s, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
             # plt.savefig('plotted_gaussians.png', dpi=1200)
 
             # cv2.destroyAllWindows()
@@ -348,8 +564,9 @@ def split_touching_lines(image):
             # TODO Think how to try and split the split images again. maybe another fit can be done?
             # TODO check height of each part in comparison to 2nd cluster size?! !
 
-            for item in xs:
+            for item in all_xs:
                 min_valley = np.int32(item[0])
+                # print(min_valley)
                 if histogram[min_valley] > np.max(histogram) * 0.5:
                     continue
                 ranges = [range(-range_to_remove, 0), range(0, range_to_remove)]
@@ -373,8 +590,8 @@ def split_touching_lines(image):
                         # print('most_right=', most_right)
                         # print('distance to remove=', most_right - most_left)
                         # print('total=', component_image.shape[1])
-                        if most_right - most_left > 0.5 * component_image.shape[1]\
-                                and len(indices_to_remove) > 0.5 * np.max(histogram):
+                        if most_right - most_left > 0.6 * component_image.shape[1]\
+                                and len(indices_to_remove) > 0.6 * np.max(histogram):
                             break
                         for index in indices_to_remove:
                             image[index] = 0
@@ -463,9 +680,9 @@ def pre_process(path, file_name, str_idx=''):
     # split touching lines
     time_print(str_idx + 'split touching lines ...')
 
-    all_images = [copy.deepcopy(image_no_tiny_elements) for i in range(10)]
+    all_images = [copy.deepcopy(image_no_tiny_elements) for i in range(1)]
     all_attempts = [split_touching_lines(img) for img in all_images]
-    all_removals = [all_attempts[i][3] for i in range(10)]
+    all_removals = [all_attempts[i][3] for i in range(1)]
     image_no_tiny_elements, to_view, before_splitting, total_segmented = all_attempts[np.argmax(all_removals)]
     if to_view is None:
         time_print(str_idx + 'No touching lines need to be split!')
