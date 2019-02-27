@@ -184,19 +184,19 @@ def split_touching_lines(image, average_width=None):
                                                np.asarray([gauss_2(r) for r in x_s]))
 
             # print(len(x_s_i))
-            if len(x_s_i) == 2:
-                result.append(np.int32(x_s_i[1]))
-            elif len(x_s_i) == 1:
-                result.append(np.int32(x_s_i[0]))
-            # for elem1 in x_s_i:
-            #     result.append(np.int32(elem1))
+            # if len(x_s_i) == 2:
+            #      result.append(np.int32(x_s_i[1]))
+            #  elif len(x_s_i) == 1:
+            #   result.append(np.int32(x_s_i[0]))
+            for elem1 in x_s_i:
+                result.append(np.int32(elem1))
         return result
 
     def get_n_cut_valleys(hist, n):
         # plt.clf()
         # plt.plot(histogram, color='black', label='hist')
         # plt.xlim([0, len(hist)])
-        x_s = np.asarray([z for z in range(len(hist))])
+        # x_s = np.asarray([z for z in range(len(hist))])
 
         # n gaussians fitting attempt
         try:
@@ -207,9 +207,10 @@ def split_touching_lines(image, average_width=None):
 
         except RuntimeError:
             # print('could not fit')
-            # plt.clf()
+            plt.clf()
             return [None for l in range(n)], [np.inf for l in range(n)]
         except ValueError:
+            plt.clf()
             return [None for l in range(n)], [np.inf for l in range(n)]
 
         # append shift for mu_i
@@ -221,12 +222,22 @@ def split_touching_lines(image, average_width=None):
         mu_n = [mu_i + i_dx * shift for i_dx, mu_i in enumerate(mu_n)]
         gauss_n = [ft.partial(gauss, mu=mu_i, sigma=sigma_i, A=A_i) for mu_i, sigma_i, A_i in
                    zip(mu_n, sigma_n, A_n)]
+        y_n_values = [hist[i_dx * piece: (i_dx + 1) * piece] for i_dx in range(0, n)]
+        # print('y_n_values=', y_n_values)
+        gauss_y_n = list()
+        for gauss_i, y_i in zip(gauss_n, y_n_values):
+            gauss_y_n.append([gauss_i(y_i_i) for y_i_i in range(0, len(y_i))])
+        # print('gauss_y_n=', gauss_y_n)
+        # distances = [sum(list(map(np.abs, list(map(op.sub, y_i, g_i))))) for y_i, g_i in zip(y_n_values, gauss_y_n)]
+        good_n = [np.abs(intg.quad(gauss_i, 0, len(y_n_values[hist_idx]), args=())[0] -
+                         intg.quad(gauss_i, -np.inf, np.inf, args=())[0])
+                  for hist_idx, gauss_i in enumerate(gauss_n)]
+        # print('distances=', distances)
+        # print('good_n=', good_n)
 
-        good_n = [np.abs(intg.quad(gauss_i, 0, len(hist), args=())[0] - intg.quad(gauss_i, -np.inf, np.inf, args=())[0])
-                  for gauss_i in gauss_n]
-
-        return gauss_n, good_n
-        # plt.plot(x_s, gauss(x_s, mu1, sigma1, A1), color='green', lw=3, label='gauss1')
+        # colors=['green', 'blue', 'red', 'yellow', 'magenta', 'brown', 'teal', 'purple', 'cyan', 'coral', 'olive', 'maroon']
+        # for indx, gauss_i in enumerate(gauss_n):
+        #     plt.plot(x_s, gauss_i(x_s), color=colors[indx], lw=3, label='gauss_' + str(indx))
         # plt.plot(x_s, gauss(x_s, mu2, sigma2, A2), color='blue', lw=3, label='gauss2')
         # plt.plot(x_s, gauss(x_s, mu3, sigma3, A3), color='red', lw=3, label='gauss3')
         # plt.plot(x_s, gauss(x_s, mu4, sigma4, A4), color='yellow', lw=3, label='gauss4')
@@ -234,6 +245,7 @@ def split_touching_lines(image, average_width=None):
         # plt.legend()
         # plt.show()
         # plt.clf()
+        return gauss_n, good_n
         # print('x_s_1=', x_s_1)
         # print('x_s_2=', x_s_2)
         # print('x_s_3=', x_s_3)
@@ -281,11 +293,11 @@ def split_touching_lines(image, average_width=None):
         # print('cluster_size=', cluster_size)
         cluster_total_widths = [sum(heights_to_cluster[l[0]] for l in enumerate(y_k_means) if l[1] == k) for k in
                                  range(n_clusters)]
-        cluster_average_sizes = [pair[0] / pair[1] for pair in zip(cluster_total_widths, cluster_size)]
+        cluster_average_sizes = [pair[0] / pair[1] if pair[1] != 0 else 0 for pair in zip(cluster_total_widths, cluster_size)]
 
-        print('cluster_sizes=', cluster_size)
-        print('cluster_total_widths=', cluster_total_widths)
-        print('cluster_average_sizes=', cluster_average_sizes)
+        # print('cluster_sizes=', cluster_size)
+        # print('cluster_total_widths=', cluster_total_widths)
+        # print('cluster_average_sizes=', cluster_average_sizes)
 
         cluster_total = [ft.reduce(lambda x_1, y_1: x_1 + y_1[1] if y_1[0] == k else x_1,
                                    zip(list(y_k_means), heights_to_cluster), 0) for k in range(n_clusters)]
@@ -294,25 +306,25 @@ def split_touching_lines(image, average_width=None):
         # print('widths=', cluster_average_sizes)
         ratios = [(cluster_average_sizes[z] / cluster_average_sizes[max_cluster])[0] for z in range(n_clusters)]
         max_average = cluster_average_sizes[np.argmax(ratios)]
-        print('first_cluster:', 'index=', np.argmax(ratios), 'size=', cluster_average_sizes[np.argmax(ratios)])
-        print('ratios=', ratios)
+        # print('first_cluster:', 'index=', np.argmax(ratios), 'size=', cluster_average_sizes[np.argmax(ratios)])
+        # print('ratios=', ratios)
         first_cluster = ratios[np.argmax(ratios)]
         ratios[np.argmax(ratios)] = -1
         second_cluster = ratios[np.argmax(ratios)]
         ratios[np.argmax(ratios)] = -1
         third_cluster = ratios[np.argmax(ratios)]
-        print('second_cluster:', 'index=', np.argmax(ratios), 'size=', cluster_average_sizes[np.argmax(ratios)])
+        # print('second_cluster:', 'index=', np.argmax(ratios), 'size=', cluster_average_sizes[np.argmax(ratios)])
         # print('second_cluster=', second_cluster)
         # print('max_cluster=', max_cluster)
         # print('second_cluster=', np.argmax(ratios))
-        print('average_width=', average_width, '2nd_cluster=', cluster_average_sizes[np.argmax(ratios)])
+        # print('average_width=', average_width, '2nd_cluster=', cluster_average_sizes[np.argmax(ratios)])
         # if average_width is not None and 0.6 * average_width > cluster_average_sizes[np.argmax(ratios)]:
         #     return y_k_means, None, None
         if average_width is not None:
             # return y_k_means, max_cluster, cluster_average_sizes[np.argmax(ratios)], average_width
             return y_k_means, max_cluster, max_average, average_width
-
-        if first_cluster * 3 > second_cluster and second_cluster * 3 > third_cluster:
+        print('ratios=', third_cluster, second_cluster, first_cluster)
+        if third_cluster * 3 > second_cluster and second_cluster * 3 > first_cluster and third_cluster * 3 < first_cluster:
             # return y_k_means, max_cluster, cluster_average_sizes[np.argmax(ratios)], None
             return y_k_means, max_cluster, max_average, None
         else:
@@ -356,9 +368,7 @@ def split_touching_lines(image, average_width=None):
         x, y, w, h, = cv2.boundingRect(component_image)
         component_image = component_image[y: y + h, x: x + w]
         # cv2.imwrite(str(i) + '_' + str(component) + '.png', component_image)
-        # find bimodal gaussian fit
-        # calc area of each gaussian in (0, len(histogram)
-        # calc overlapping area
+
         if component == max_cluster_index:
             # print('INDEX = ', i, )
             component_image = np.zeros_like(image)
@@ -367,7 +377,9 @@ def split_touching_lines(image, average_width=None):
             component_image = component_image[y: y + h, x: x + w]
             new_image = cv2.cvtColor(np.zeros_like(component_image), cv2.COLOR_GRAY2RGB)
             new_image[component_image == 255] = (255, 0, 0)
-            # cv2.imwrite('component_before.png', new_image)
+            # cv2.imwrite(str(i) + '_component_before.png', new_image)
+            # cv2.namedWindow('before_split')
+            # cv2.imshow('before_split', new_image)
             component_image = new_image
             component_indexes = list(zip(*np.where(labels == i)))
             # create histogram then split !
@@ -377,7 +389,7 @@ def split_touching_lines(image, average_width=None):
             max_y = max(y_indexes)
             j = 0
             histogram = [0 for x in range(min_y, max_y + 1)]
-            print('old_width=', old_width, 'component_width=', len(histogram))
+            # print('old_width=', old_width, 'component_width=', len(histogram))
             if old_width is not None and old_width > len(histogram):
                 continue
             for y_val in range(min_y, max_y + 1):
@@ -392,15 +404,25 @@ def split_touching_lines(image, average_width=None):
 
             candidate_xs = list(filter(lambda elem: elem is not None, candidate_xs))
 
-            all_xs = candidate_xs[0]
-            min_average_error = sum(candidate_xs[0][1]) / len(candidate_xs[0][1])
-            for candidate in candidate_xs[1:]:
+            all_xs = None
+            min_average_error = np.inf
+            for candidate in candidate_xs:
                 new_error = sum(candidate[1]) / len(candidate[1])
+                # print('candidate=', len(candidate[1]), 'error=', new_error)
                 if min_average_error > new_error:
                     all_xs = candidate
                     min_average_error = new_error
+            # print('------------------------')
             if min_average_error == np.inf:
                 continue
+            # colors = ['green', 'blue', 'red', 'yellow', 'magenta', 'brown', 'teal', 'purple', 'cyan', 'coral', 'olive',
+            #           'maroon']
+            # plt.clf()
+            # plt.plot(histogram, color='black', label='hist')
+            # plt.xlim([0, len(histogram)])
+            # x_s = np.asarray([z for z in range(len(histogram))])
+            # for indx, gauss_l in enumerate(all_xs[0]):
+            #     plt.plot(x_s, gauss_l(x_s), color=colors[indx], lw=3, label='gauss_' + str(indx))
             all_xs = calc_valleys(all_xs[0], histogram)
             # print('all_xs=', all_xs)
 
@@ -409,7 +431,7 @@ def split_touching_lines(image, average_width=None):
             # plt.plot(x_s, gauss(x_s, mu2, sigma2, A2),
             #         color='blue', lw=3, label='gauss2')
             # plt.plot(x_s, bimodal(x_s, mu1, sigma1, A1, mu2, sigma2, A2), color='red', lw=3, label='bi-modal')
-            # plt.savefig('plotted_gaussians.png', dpi=1200)
+            # plt.savefig(str(i) + '_plotted_gaussians.png', dpi=1200)
 
             # cv2.destroyAllWindows()
             # remove
@@ -418,8 +440,6 @@ def split_touching_lines(image, average_width=None):
             # this to make sure the distance between the two suggested points is high enough
             # if len(xs) > 1 and xs[0][0] - xs[1][0] < 0.9 * len(histogram) / 2:
             #     xs = xs[1:]
-            # TODO Think how to try and split the split images again. maybe another fit can be done?
-            # TODO check height of each part in comparison to 2nd cluster size?! !
 
             for item in all_xs:
                 min_valley = np.int32(item[0])
@@ -453,10 +473,14 @@ def split_touching_lines(image, average_width=None):
                         for index in indices_to_remove:
                             image[index] = 0
                             to_view[index] = (255, 255, 255)
-            # cv2.imwrite('after_component_image.png', component_image)
+            # cv2.imwrite(str(i) + '_after_component_image.png', component_image)
+            # cv2.namedWindow('after_split')
+            # cv2.imshow('after_split', component_image)
             # plt.legend()
             # plt.show()
             # plt.clf()
+            # cv2.waitKey()
+            # cv2.destroyAllWindows()
     # print('total_segmented=', total_segmented)
     return image, to_view, before_splitting, total_segmented, average_width
 
@@ -1210,7 +1234,7 @@ def calculate_edge_scores_local(u, v, edge_dictionary, t_scores, max_dist):
 # finds "best" out of local region angle and complete edge angle - for each edge
 # totals 6 possible combinations
 #
-def calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist):
+def calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist=None):
     junction_v_edges = [edge for edge in edge_dictionary
                         if (edge[0] == v and edge[1] != u) or (edge[0] != u and edge[1] == v)]
     v_edges = [e[0] if e[1] == v else e[1] for e in junction_v_edges]
@@ -1225,7 +1249,12 @@ def calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist):
         if w1 in excluded or w2 in excluded:
             continue
         # get coordinates in radius 9 - then calculate angle
-        in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary, max_dist=max_dist)
+        if max_dist is None:
+            in_u = u
+            in_w1 = w1
+            in_w2 = w2
+        else:
+            in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary, max_dist=max_dist)
         # print('in_u=', in_u, 'in_w1=', in_w1,'v=', v, 'in_w2=', in_w2)
         u_s = [u, in_u]
         w1_s = [w1, in_w1]
@@ -1257,8 +1286,8 @@ def calculate_junctions_t_scores(edge_dictionary, excluded):
         # print(excluded)
         if u in excluded or v in excluded:
             continue
-        calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded, max_dist=7)
-        calculate_edge_scores(v, u, edge_dictionary, t_scores, excluded, max_dist=7)
+        calculate_edge_scores(u, v, edge_dictionary, t_scores, excluded)  # , max_dist=7)
+        calculate_edge_scores(v, u, edge_dictionary, t_scores, excluded)  # , max_dist=7)
     # return all possibilities
     return t_scores
 
@@ -1466,7 +1495,7 @@ def create_v_scores(t_scores, l_scores):
 # ---------------------------------------------------------------------------------
 #
 def combine_edges(bridges, links, rest, edge_dictionary):
-    def merge_group(candidate_edges, edge_dict, adj_list, anchors, threshold=np.pi / 3):
+    def merge_group(candidate_edges, edge_dict, adj_list, anchors, threshold=np.pi / 5):
         # we combine two links as one if angle between them is minimum
         done = False
         while not done:
@@ -1547,7 +1576,7 @@ def combine_edges(bridges, links, rest, edge_dictionary):
     both = definite_links + can_be_both
     # combine edges - second iteration, now we include conflict edges
     both, edge_dictionary, adjacency_list = merge_group(both, edge_dictionary, adjacency_list, rest,
-                                                        threshold=np.pi / 5)
+                                                        threshold=np.pi / 6)
 
     # remove bridges from document graph that were not used in conflict stage
     only_bridges = [bridge for bridge in bridges if bridge in edge_dictionary.keys()]
@@ -1808,6 +1837,6 @@ if __name__ == "__main__":
         # execute_parallel('./data/')
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./data/', './results/')
-        execute('./data/', './results/')
+        execute('./CB55P_SMALL/', './CB55P_SMALL_RESULTS/')
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./CB55_data/', './CB55_results/')
