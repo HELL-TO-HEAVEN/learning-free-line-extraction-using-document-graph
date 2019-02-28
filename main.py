@@ -1,10 +1,9 @@
-import sys
 import random as rd
 import functools as ft
 import itertools as it
 import operator as op
 import collections as col
-import numpy as np
+
 from enum import Enum
 import datetime
 from decimal import Decimal, getcontext
@@ -12,7 +11,62 @@ import pickle
 from os import listdir
 from os.path import isfile, join
 import copy
+import numpy as np
 import cv2
+from skimage import morphology
+from skan import csr
+from concurrent.futures import ProcessPoolExecutor
+from concurrent import futures
+
+
+
+def neighbours(x, y, image):
+    # "Return 8-neighbours of image point P1(x,y), in a clockwise order"
+    img = image
+    x_1, y_1, x1, y1 = x-1, y-1, x+1, y+1
+    return [img[x_1][y], img[x_1][y1], img[x][y1], img[x1][y1],     # P2,P3,P4,P5
+        img[x1][y], img[x1][y_1], img[x][y_1], img[x_1][y_1]]    # P6,P7,P8,P9
+
+
+def transitions(neighbors):
+    # "No. of 0,1 patterns (transitions from 0 to 1) in the ordered sequence"
+    n = neighbors + neighbors[0:1]      # P2, P3, ... , P8, P9, P2
+    return sum( (n1, n2) == (0, 1) for n1, n2 in zip(n, n[1:]) )  # (P2,P3), (P3,P4), ... , (P8,P9), (P9,P2)
+
+
+def zhang_suen(image):
+    # "the Zhang-Suen Thinning Algorithm"
+    Image_Thinned = image.copy()  # deepcopy to protect the original image
+    changing1 = changing2 = 1        #  the points to be removed (set as 0)
+    while changing1 or changing2:   #  iterates until no further changes occur in the image
+        # Step 1
+        changing1 = []
+        rows, columns = Image_Thinned.shape               # x for rows, y for columns
+        for x in range(1, rows - 1):                     # No. of  rows
+            for y in range(1, columns - 1):            # No. of columns
+                P2, P3, P4, P5, P6, P7, P8, P9 = n = neighbours(x, y, Image_Thinned)
+                if (Image_Thinned[x][y] == 1     and    # Condition 0: Point P1 in the object regions
+                    2 <= sum(n) <= 4   and    # Condition 1: 2<= N(P1) <= 6
+                    transitions(n) == 1 and    # Condition 2: S(P1)=1
+                    P2 * P4 * P6 == 0  and    # Condition 3
+                    P4 * P6 * P8 == 0):         # Condition 4
+                    changing1.append((x,y))
+        for x, y in changing1:
+            Image_Thinned[x][y] = 0
+        # Step 2
+        changing2 = []
+        for x in range(1, rows - 1):
+            for y in range(1, columns - 1):
+                P2, P3, P4, P5, P6, P7, P8, P9 = n = neighbours(x, y, Image_Thinned)
+                if (Image_Thinned[x][y] == 1   and        # Condition 0
+                    2 <= sum(n) <= 4  and       # Condition 1
+                    transitions(n) == 1 and      # Condition 2
+                    P2 * P4 * P8 == 0 and       # Condition 3
+                    P2 * P6 * P8 == 0):            # Condition 4
+                    changing2.append((x,y))
+        for x, y in changing2:
+            Image_Thinned[x][y] = 0
+    return Image_Thinned
 
 
 # ---------------------------------------------------------------------------------
@@ -63,7 +117,11 @@ def overlay_edges(image, edge_list, color=None):
         random_color = color
     for point in edge_list:
         # cv2.circle(image, point, radius, random_color, cv2.FILLED)
-        image_copy[point] = random_color
+        r, g, b = image_copy[point]
+        if r == 0 and g == 0 and b == 0:
+            image_copy[point] = random_color
+        else:
+            image_copy[point] = (255, 255, 255)
     return image_copy
 
 
@@ -173,46 +231,121 @@ def close_junctions(junctions_mask, ridge_mask):
 # ---------------------------------------------------------------------------------
 # mark junction pixels using kernels and the ridge matrix
 def mark_junction_pixels(binary_image):
+    def idx_check(index):
+        if index < 0:
+            return 0
+        else:
+            return index
+
+    def erosion(binary_img_matrix, structuring_element_in):
+        structuring_element = copy.deepcopy(structuring_element_in)
+        offset = np.where(structuring_element == 2)
+        structuring_element[offset[0][0], offset[1][0]] = 1
+        binary_img_matrix = np.asarray(binary_img_matrix)
+        structuring_element = np.asarray(structuring_element)
+        ste_shp = structuring_element.shape
+        eroded_img = np.zeros_like(binary_img_matrix)
+        ste_origin = (int(np.floor((structuring_element.shape[0]) / 2.0)),
+                      int(np.floor((structuring_element.shape[1]) / 2.0)))
+        offset_row = ste_origin[0] - offset[0][0]
+        offset_col = ste_origin[1] - offset[1][0]
+
+        for i in range(ste_origin[0], len(binary_img_matrix) - ste_origin[0]):
+            for j in range(ste_origin[1], len(binary_img_matrix[0]) - ste_origin[1]):
+                overlap = binary_img_matrix[idx_check(i - ste_origin[0]):i + (ste_shp[0] - ste_origin[0]),
+                          idx_check(j - ste_origin[1]):j + (ste_shp[1] - ste_origin[1])]
+                shp = overlap.shape
+                ste_first_row_idx = int(np.fabs(i - ste_origin[0])) if i - ste_origin[0] < 0 else 0
+                ste_first_col_idx = int(np.fabs(j - ste_origin[1])) if j - ste_origin[1] < 0 else 0
+
+                ste_last_row_idx = ste_shp[0] - 1 - (
+                            i + (ste_shp[0] - ste_origin[0]) - binary_img_matrix.shape[0]) if i + (
+                            ste_shp[0] - ste_origin[0]) > binary_img_matrix.shape[0] else ste_shp[0] - 1
+                ste_last_col_idx = ste_shp[1] - 1 - (
+                            j + (ste_shp[1] - ste_origin[1]) - binary_img_matrix.shape[1]) if j + (
+                            ste_shp[1] - ste_origin[1]) > binary_img_matrix.shape[1] else ste_shp[1] - 1
+
+                if shp[0] != 0 and shp[1] != 0 and np.array_equal(
+                        np.logical_and(overlap, structuring_element[ste_first_row_idx:ste_last_row_idx + 1,
+                                                ste_first_col_idx:ste_last_col_idx + 1]),
+                        structuring_element[ste_first_row_idx:ste_last_row_idx + 1, ste_first_col_idx:ste_last_col_idx + 1]):
+                    eroded_img[i - offset_row, j - offset_col] = 1
+        return eroded_img
+
     def rotate(mat):
         return mat, mat.T, np.flipud(mat), np.fliplr(mat.T)
 
     junctions = map(uint8_array, [
         [
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [1, 1, 1, 1, 1],
+            [1, 1, 2, 1, 1],
             [0, 0, 1, 0, 0],
             [0, 0, 1, 0, 0],
             [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+
         ],
         [
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [1, 1, 1, 1, 1],
-            [0, 0, 1, 0, 0],
-            [0, 0, 0, 1, 0],
-            [0, 0, 0, 0, 1],
+            [1, 1, 2, 1, 1, 0, 0, 0],
+            [0, 0, 1, 1, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 0, 0, 1, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 0, 0, 1],
         ],
         [
-            [0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 1, 2, 1, 1],
+            [0, 0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+        ],
+        [
             [1, 0, 0, 0, 1],
             [0, 1, 0, 1, 0],
+            [0, 1, 2, 1, 0],
             [0, 0, 1, 0, 0],
             [0, 0, 1, 0, 0],
             [0, 0, 1, 0, 0],
             [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+        ],
+        [
+            [1, 1, 0, 0, 0, 1, 1],
+            [0, 1, 1, 0, 1, 1, 0],
+            [0, 0, 1, 1, 1, 0, 0],
+            [0, 0, 0, 2, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+        ],
+        [
+            [1, 0, 0, 0, 0, 0, 1],
+            [0, 1, 0, 0, 0, 1, 0],
+            [0, 0, 1, 1, 1, 0, 0],
+            [0, 0, 1, 2, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0],
         ],
     ])
 
     rotated_mats = (rotated for mat in junctions for rotated in rotate(mat))
-
-    junctions_mask = ft.reduce(op.or_, map(ft.partial(cv2.erode, binary_image), rotated_mats),
+    junctions_mask = ft.reduce(op.or_, map(ft.partial(erosion, binary_image), rotated_mats),
                                np.zeros_like(binary_image))
     # we need to close junctions -> find min_x min_y max_x max_y then add ridge pixels to it
     # cv2.imwrite("before.png", overlay_images(binary_image*255, junctions_mask*255))
-    return close_junctions(junctions_mask, binary_image)
+    #
+    # return close_junctions(junctions_mask, binary_image)
+    return junctions_mask
 
 
 # ---------------------------------------------------------------------------------
@@ -276,26 +409,99 @@ def get_vertexes(ridges_matrix, junction_pixels_mask):
 
 
 # ---------------------------------------------------------------------------------
+# retrieves connected pixels that are part of the edge pixels
+# to be used for the bfs algorithm
+# 8 connected neighborhood of a pixel
+def connected_candidates(pixel, skeleton):
+    def add_offset(offset):
+        return tuple(map(op.add, pixel, offset))
+
+    def in_bounds_and_true(p):
+        row, col = add_offset(p)
+        if row >=0 and \
+                col >=0 and \
+                row < skeleton.shape[0] and \
+                col < skeleton.shape[1] and \
+                skeleton[row][col]:
+            return True
+        else:
+            return False
+
+    eight_connected = list(filter(in_bounds_and_true, [(1, 0), (0, 1), (-1, 0), (0, -1),
+                                                                      (1, 1), (-1, 1), (-1, -1), (1, -1)]))
+
+    return [add_offset(offset) for offset in eight_connected]
+
+
+
+# ---------------------------------------------------------------------------------
 # retrieves m_connected pixels that are part of the edge pixels
 # to be used for the bfs algorithm
 def m_connected_candidates(pixel, edge_pixels):
     def add_offset(offset):
         return tuple(map(op.add, pixel, offset))
-
+    # print('edge_pixels=', edge_pixels)
     four_connected = list(filter(lambda p: add_offset(p) in edge_pixels, [(1, 0), (0, 1), (-1, 0), (0, -1)]))
-
+    # print('four_connected=', four_connected)
     diagonally_connected = list(filter(lambda p: add_offset(p) in edge_pixels,
                                        [(1, 1), (-1, 1), (-1, -1), (1, -1)]))
-
+    # print('diagonally_connected=', diagonally_connected)
     uniquely_diagonally_connected = list(filter(lambda p: {(0, p[1]), (p[0], 0)}.isdisjoint(set(four_connected)),
                                                 diagonally_connected))
-
+    # print('uniquely_diagonally_connected=', uniquely_diagonally_connected)
     return [add_offset(offset) for offset in four_connected + uniquely_diagonally_connected]
+
+
 
 
 # ---------------------------------------------------------------------------------
 # returns for edge (u,v) its shortest m-connected list of pixels from pixel u to pixel v
-def m_edge_bfs(start, end, edge_list):
+def m_edge_bfs(edge, edge_list):
+    start, end = edge
+    visited = set()
+    to_visit = col.deque([start])
+    edges = col.deque()
+    done = False
+    while not done and to_visit:
+        current = to_visit.popleft()
+        # print('current=', current)
+        visited.add(current)
+        candidates = [v for v in m_connected_candidates(current, edge_list)
+                      if v not in visited and v not in to_visit]
+        # print('candidates=', candidates)
+        for vertex in candidates:
+            edges.append([current, vertex])
+            to_visit.append(vertex)
+            if vertex == end:
+                done = True
+                # print('done!')
+    # print('start=', start, 'end=', end)
+    # print('candidates=', edges)
+    # exit()
+    # find path from end -> start
+    final_edges = [end]
+    current = end
+    failed = False
+    while current != start and not failed:
+        sub_edges = list(filter(lambda item: item[1] == current, edges))
+        if sub_edges:
+            one_edge = sub_edges.pop()
+            final_edges.append(one_edge[0])
+            current = one_edge[0]
+        else:
+            failed = True
+
+    final_edges.append(start)
+    if failed:
+        return edge, []
+    else:
+        return edge, final_edges
+
+
+# ---------------------------------------------------------------------------------
+# returns for edge (u,v) its shortest connected list of pixels from pixel u to pixel v
+def edge_bfs(start, end, skeleton):
+
     visited = set()
     to_visit = col.deque([start])
     edges = col.deque()
@@ -303,23 +509,43 @@ def m_edge_bfs(start, end, edge_list):
     while not done and to_visit:
         current = to_visit.popleft()
         visited.add(current)
-        candidates = [v for v in m_connected_candidates(current, edge_list)
+        candidates = [v for v in connected_candidates(current, skeleton)
                       if v not in visited and v not in to_visit]
+        # print('candidates=', candidates)
         for vertex in candidates:
             edges.append([current, vertex])
             to_visit.append(vertex)
             if vertex == end:
                 done = True
+    # print('start=', start, 'end=', end)
+    # print('candidates=', edges)
+    # exit()
+
     # find path from end -> start
     final_edges = [end]
     current = end
-    while current != start:
+    failed = False
+    while current != start and not failed:
+        # print('current=', current)
         sub_edges = list(filter(lambda item: item[1] == current, edges))
-        one_edge = sub_edges.pop()
-        final_edges.append(one_edge[0])
-        current = one_edge[0]
+        # print('sub_edges=', sub_edges)
+        if sub_edges:
+            one_edge = sub_edges.pop()
+            final_edges.append(one_edge[0])
+            current = one_edge[0]
+        else:
+            failed = True
+
     final_edges.append(start)
-    return final_edges
+    # print('finalEdges=', final_edges)
+    # exit()
+
+    if failed:
+        print(start, end, 'fail')
+        return start, end, []
+    else:
+        # print(start, end, 'success')
+        return start, end, final_edges
 
 
 # ---------------------------------------------------------------------------------
@@ -398,8 +624,56 @@ def merge_two_edge_vertexes(edge_dictionary):
 
 
 # ---------------------------------------------------------------------------------
+# merge_overlapped_edges(edge_dictionary)
+# TODO merging overlapped edges
+def merge_overlapped_edges(edge_dictionary, ridges_mask):
+    keys_list = list(edge_dictionary.keys())
+    for edge_i in range(0, len(edge_dictionary.keys()) - 1):
+        edge_i_key = keys_list[edge_i]
+        edge_i_js = []
+        edge_i_intersections = []
+        edge_i_intersections_length = []
+
+        for edge_j in range(edge_i + 1, len(edge_dictionary.keys()) - 1):
+            edge_j_key = keys_list[edge_j]
+            edge_i_js.append(edge_j_key)
+            intersected_set = set(edge_dictionary[edge_i_key]).intersection(edge_dictionary[edge_j_key])
+            edge_i_intersections.append(intersected_set)
+            edge_i_intersections_length.append(len(intersected_set))
+            # / len( set(edge_dictionary[edge_i_key]).union(edge_dictionary[edge_j_key])))
+        max_intersection_index = np.argmax(edge_i_intersections_length)
+        print('max_idx=', max_intersection_index, 'max_val=', edge_i_intersections_length[max_intersection_index])
+
+        image = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+        image = draw_edges([edge_i_key], edge_dictionary, image, (255, 0, 0))
+        cv2.namedWindow('edge_i')
+        cv2.imshow('edge_i', image)
+        cv2.imwrite('edge_i.png', image)
+        image = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+        print('edge_i_js[max_intersection_index]=', edge_i_js[max_intersection_index]   )
+        image = draw_edges([edge_i_js[max_intersection_index]], edge_dictionary, image, (0, 0, 255))
+        cv2.namedWindow('edge_j')
+        cv2.imwrite('edge_j.png', image)
+        cv2.imshow('edge_j', image)
+        image = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+        image = overlay_edges(image, edge_i_intersections[max_intersection_index], (0, 255, 0))
+        cv2.namedWindow('overlap')
+        cv2.imwrite('overlap.png', image)
+        cv2.imshow('overlap', image)
+
+        print('edge_i:', edge_dictionary[edge_i_key])
+        print('edge_j:', edge_i_js[max_intersection_index])
+        print('intersection:', edge_i_intersections[max_intersection_index])
+
+        cv2.waitKey()
+        cv2.destroyAllWindows()
+        # exit()
+    return edge_dictionary
+
+
+# ---------------------------------------------------------------------------------
 # clean graph up by removing 1-edge vertexes, and merging 2-edge vertexes
-def clean_graph(edge_dictionary):
+def clean_graph(edge_dictionary, ridges_mask):
     # print(stats)
     time_print('graph cleanup...')
     # for each vertex, if it takes part of two edges exactly, we combine the two edges as one
@@ -419,6 +693,8 @@ def clean_graph(edge_dictionary):
         changed, edge_dictionary = merge_two_edge_vertexes(edge_dictionary)
         if changed:
             changed, edge_dictionary = remove_one_edge_vertexes(edge_dictionary)
+
+    edge_dictionary = merge_overlapped_edges(edge_dictionary, ridges_mask)
     # after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
     #for edge_list in edge_dictionary.values():
     #    after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
@@ -427,6 +703,85 @@ def clean_graph(edge_dictionary):
     # cv2.imwrite('left.png', left)
     # cv2.waitKey()
     # cv2.destroyAllWindows()
+    return edge_dictionary
+
+
+# ---------------------------------------------------------------------------------
+# get_edges_between_vertexes(edges, degrees)
+def get_edges_between_vertexes(edges, degrees):
+
+    image = cv2.cvtColor(np.zeros_like(degrees, np.uint8), cv2.COLOR_GRAY2RGB)
+    edge_dictionary = dict()
+
+    all_pixels = np.where(degrees == 255)
+    all_pixels = list(zip(all_pixels[0], all_pixels[1]))
+    # print(image.shape)
+
+    # for pixel in all_pixels :
+    #     image[pixel] = (0, 0, 255)
+    colors = []
+    time_print('finding edges...')
+
+    pool = ProcessPoolExecutor(max_workers=30)
+    # wait_for = [pool.submit(m_edge_bfs, edge, all_pixels) for edge in edges]
+    wait_for = [pool.submit(edge_bfs, edge, all_pixels) for edge in edges]
+    # results = [f.result() for f in futures.as_completed(wait_for)]
+    results = []
+    total = len(wait_for)
+    i = 1
+    for f in futures.as_completed(wait_for):
+        result = f.result()
+        # print(result)
+        if result[1]:
+            results.append(result)
+            print('[' + str(i) + '/' + str(total) + '] ' + str(len(result[1])))
+        else:
+            print('[' + str(i) + '/' + str(total) + '] failed!!!!!')
+        i += 1
+
+    for result in results:
+        edge, edge_list = result
+        random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        while random_color in colors:
+            random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+            image = draw_edge(edge_list, image, random_color)
+            colors.append(random_color)
+    cv2.imwrite('result.png', image)
+    cv2.namedWindow('result')
+    cv2.imshow('result', image)
+
+
+    # with Pool(processes=40) as pool:
+    #    temp = [pool.apply_async(m_edge_bfs, (edge, all_pixels)) for edge in edges]
+    #    print('waiting...')
+    #    i = 1
+    #    for t in temp:
+    #        results = t.get()
+    #        print(i, end=' ')
+    #        i += 1
+    #    print('done!')
+
+
+
+    # for edge in edges:
+    #    print('[' + str(i) + '/' + str(total) + ']')
+    #   i += 1
+    #    v, u = edge
+    #     m_adjacent_edge_pixels = m_edge_bfs(v, u, all_pixels)
+    #     edge_dictionary[edge] = m_adjacent_edge_pixels
+
+    for edge in edge_dictionary.keys():
+        random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        while random_color in colors:
+            random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+            image = draw_edge(edge_dictionary[edge], image, random_color)
+            colors.append(random_color)
+
+    cv2.namedWindow('result')
+    cv2.imshow('result', image)
+    # print('len=', len(m_adjacent_edge_pixels), 'edge=', m_adjacent_edge_pixels)
+    cv2.waitKey()
+    cv2.destroyAllWindows()
     return edge_dictionary
 
 
@@ -524,8 +879,129 @@ def get_edges(ridges_mask, junction_pixels_mask, vertexes_list):
             edge_dictionary[tuple(start_end_vertexes)] = m_adjacent_edge_pixels
             edge_set.update(edge_pixels)
             # stats[2] += 1
-
     return edge_dictionary
+
+
+# -
+# All vertexes with one degree (take part of one edge only) - they are removed
+# All vertexes with two degree (take part of two edges exactly) - they are merged
+# this is done iteratively, until all vertexes have a degree of three or more!
+def remove_one_degree_edges(skeleton, iter_index):
+    cv2.imwrite('skel_' + str(iter_index) + '.png', skeleton.astype(np.uint8) * 255)
+
+    # TODO add to paper information about this !!! remove redundant edges
+    # summarization shows each edge, its start and end pixel, length, distance, etc
+    # ALSO!! it has two types of edges, one that has two vertexes in graph
+    # others that have one vertex only - those to be removed!
+    # TODO THESE ARE EDGE END POINTS - TWO VERTEX COORDINATES FOR EACH EDGE
+    branch_data = csr.summarise(skeleton)
+    coords_cols = (['img-coord-0-%i' % i for i in [1, 0]] +
+                   ['img-coord-1-%i' % i for i in [1, 0]])
+    coords = branch_data[coords_cols].values.reshape((-1, 2, 2))
+    # TODO Each Vertex to stay in the graph needs to have a degree of two or more
+    # TODO Iteratively, we remove those that have less than two degree
+    # TODO We stop only when there are no more vertexes left with low degree
+    # TODO THEN WE EXTRACT THE EDGES - USING BFS ?! NEED TO FIND A GOOD WAY
+
+    done = False
+    changed = False
+    while not done:
+        flat_coords = [tuple(val) for sublist in coords for val in sublist]
+        len_before = len(coords)
+        for item in set(flat_coords):
+            # print('item=', item, 'count=', flat_coords.count(item))
+            # 1 degree vertexes are to be removed from graph
+            if flat_coords.count(item) < 2:
+                coords = list(filter(lambda x: tuple(x[0]) != item and tuple(x[1]) != item, coords))
+            # 2 degree vertexes need their edges to be merged
+            if flat_coords.count(item) == 2:
+                fc = list(filter(lambda x: tuple(x[0]) == item or tuple(x[1]) == item, coords))
+                if len(fc) < 2:
+                    continue # TODO CHECK IF THIS IS PROBLIMATIC - ! IF ALL ARE MERGED FOR REAL
+                # print('fc=', fc)
+                coords = list(filter(lambda x: tuple(x[0]) != item and tuple(x[1]) != item, coords))
+                e1_s = fc[0][0]
+                e1_e = fc[0][1]
+                e2_s = fc[1][0]
+                e2_e = fc[1][1]
+
+                # print('e1_s=', e1_s, 'e1_e=', e1_e)
+                # print('e2_s=', e2_s, 'e2_e=', e2_e)
+                # exit()
+                # print(coords)
+                if ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_s, e2_s))):
+                    coords.append(np.array([e1_e, e2_e]))
+                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_s, e2_e))):
+                    coords.append(np.array([e1_e, e2_s]))
+                elif ft.reduce(op.and_, map(lambda e: e[0] == e[1], zip(e1_e, e2_s))):
+                    coords.append(np.array([e1_s, e2_e]))
+                else:
+                    coords.append(np.array([e1_s, e2_s]))
+        if len_before == len(coords):
+            done = True
+        else:
+            changed = True
+            print('before=', len_before, 'after=', len(coords))
+
+    skel = cv2.cvtColor(skeleton.astype(np.uint8) * 255, cv2.COLOR_GRAY2RGB)
+    # cv2.namedWindow('skeleton')
+    cv2.imwrite('skeleton.png', skel)
+    # cv2.imshow('skeleton', skel)
+    # TODO DISCONNECT EVERY JUNCTION - THIS HELPS BFS CONVERGE FASTER!
+    tmp_skel = copy.deepcopy(skeleton)
+    for coord in coords:
+        start, end = coord
+        start = (start[1], start[0])
+        end = (end[1], end[0])
+        # print(start, end)
+        start_neighborhood = connected_candidates(start, skeleton)
+        end_neighborhood = connected_candidates(end, skeleton)
+        for point in start_neighborhood + end_neighborhood:
+            tmp_skel[point] = False
+        tmp_skel[start] = False
+        tmp_skel[end] = False
+    # cv2.namedWindow('skeleton_junctions')
+    # cv2.imwrite('skeleton_junctions.png', skel)
+    # cv2.imshow('skeleton_junctions', skel)
+
+    # TODO NOW WE EXTRACT EDGES, FIND BFS (SHORTEST PATH) BETWEEN TWO GIVEN VERTEXES
+    cv2.imwrite('base_' + str(iter_index) + '.png', tmp_skel.astype(np.uint8) * 255)
+
+    skel = np.zeros_like(skeleton)
+    results = []
+    for edge in coords:
+        start, end = edge
+        start = (start[1], start[0])
+        end = (end[1], end[0])
+        start_neighborhood = connected_candidates(start, skeleton)
+        end_neighborhood = connected_candidates(end, skeleton)
+        for point in start_neighborhood + end_neighborhood:
+            tmp_skel[point] = True
+        tmp_skel[start] = True
+        tmp_skel[end] = True
+        _, _, result = edge_bfs(start, end, tmp_skel)
+        start_neighborhood = connected_candidates(start, skeleton)
+        end_neighborhood = connected_candidates(end, skeleton)
+        for point in start_neighborhood + end_neighborhood:
+             tmp_skel[point] = False
+        tmp_skel[start] = False
+        tmp_skel[end] = False
+        results.append((start, end, result))
+        for point in result:
+            skel[point] = True
+
+    colors = []
+    image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
+    for result in results:
+        start, end, edge_list = result
+        random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        while random_color in colors:
+            random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        for point in edge_list:
+            image[point] = random_color
+        colors.append(random_color)
+    cv2.imwrite('iter_' + str(iter_index) + '.png', image)
+    return skel, results, changed
 
 
 # ---------------------------------------------------------------------------------
@@ -547,8 +1023,62 @@ def ridge_extraction(image_preprocessed):
         dist_maxima_mask_biggest_component[labels == largest_label] = val
     # extract local maxima pixels magnitude values from the distance transform
     dist_maxima = np.multiply(dist_maxima_mask_biggest_component, dist_transform)
+    # TODO show before and after result
+    # cv2.namedWindow('before')
+    # cv2.imshow('before', dist_maxima_mask_biggest_component * 255)
+    # cv2.imwrite('before_zhang.png', dist_maxima_mask_biggest_component * 255)
+    # TODO check which skeletonization is used !!!!! The skeleton is thinned usign this method
+    # we extract our own skeleton, here we just use thinning after ridge extraction
+    skeleton = morphology.skeletonize(dist_maxima_mask_biggest_component)
+    # TODO THIS SKELETONIZATION USES -> [Zha84]	(1, 2) A fast parallel algorithm for thinning digital patterns, T. Y. Zhang and C. Y. Suen, Communications of the ACM, March 1984, Volume 27, Number 3.
+    # cv2.imwrite('skeleton.png', dist_maxima_mask_biggest_component.astype(np.uint8) * 255)
+    # TODO to add to paper!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    # degree has each pixel and # of neighbors, to distinguish junction from non junction
+    # so far I think 3+ neighbors are chosen, but begin from highest number of neighbors in greedy manner
+    # each time if a pixel chosen as junction, a nearby pixel cannot be chosen as junction even if it fits
+    # the minimum number of pixels
 
-    return dist_maxima_mask_biggest_component, dist_maxima
+    # cv2.imwrite('degrees.png', cv2.normalize(degrees, None, 0, 255, cv2.NORM_MINMAX))
+    # TODO add to paper information about this !!! remove redundant edges
+    # summarization shows each edge, its start and end pixel, length, distance, etc
+    # ALSO!! it has two types of edges, one that has two vertexes in graph
+    # others that have one vertex only - those to be removed!
+    # TODO THESE ARE EDGE END POINTS - TWO VERTEX COORDINATES FOR EACH EDGE
+    # branch_data, g, coords_img, skeleton_ids, num_skeletons = csr.summarise(skeleton)
+    # coords_cols = (['img-coord-0-%i' % i for i in [1, 0]] +
+    #                ['img-coord-1-%i' % i for i in [1, 0]])
+    # coords = branch_data[coords_cols].values.reshape((-1, 2, 2))
+    # TODO Each Vertex to stay in the graph needs to have a degree of two or more
+    # TODO Iteratively, we remove those that have less than two degree
+    # TODO We stop only when there are no more vertexes left with low degree
+    # TODO THEN WE EXTRACT THE EDGES - USING BFS ?! NEED TO FIND A GOOD WAY
+
+    changed = True
+    results = []
+    iter_index = 0
+    while changed:
+        print('iter', iter_index)
+        skeleton, results, changed = remove_one_degree_edges(skeleton, iter_index)
+        iter_index += 1
+    print('done')
+    colors = []
+    image = cv2.cvtColor(np.zeros_like(skeleton, np.uint8), cv2.COLOR_GRAY2RGB)
+    edge_dictionary = dict()
+    for result in results:
+        start, end, edge_list = result
+        edge_dictionary[(start, end)] = result
+        random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        while random_color in colors:
+            random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        for point in edge_list:
+            image[point] = random_color
+        colors.append(random_color)
+    cv2.imwrite('resultFinal.png', image)
+    cv2.namedWindow('resultFinal')
+    cv2.imshow('resultFinal', image)
+    cv2.waitKey()
+    cv2.destroyAllWindows()
+    return skeleton, edge_dictionary
 
 
 # ---------------------------------------------------------------------------------
@@ -587,10 +1117,10 @@ def calculate_abs_angle(u, v, w):
     norma_2 = Decimal(x2 * x2 + y2 * y2).sqrt()
     if norma_1 == 0.0:
         print('norma_1==0->', u, v, w)
-        norma_1 = sys.float_info.epsilon
+        norma_1 = Decimal(0.0001)
     if norma_2 == 0.0:
         print('norma_2==0->', u, v, w)
-        norma_2 = sys.float_info.epsilon
+        norma_2 = Decimal(0.0001)
     val = dot / (norma_1 * norma_2)
 
     return np.abs(np.arccos(float(val)))
@@ -938,6 +1468,8 @@ def combine_edges(vertexes_list, edge_dictionary, ridges_mask):
         while edge_dictionary_iter:
             edge, edge_pixels = edge_dictionary_iter.popitem()
             u, v = edge
+            if u == v:
+                continue
             if edge not in vertexes_along_edges.keys():
                 vertexes_along_edges[edge] = edge
             # print('vertexes_along_edges=', vertexes_along_edges)
@@ -984,6 +1516,241 @@ def combine_edges(vertexes_list, edge_dictionary, ridges_mask):
 
 
 # ---------------------------------------------------------------------------------
+# draw_graph_edges
+def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False):
+    after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    for edge_list in edge_dictionary.values():
+        colors = []
+        random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        while random_color in colors:
+            random_color = (rd.randint(50, 200), rd.randint(50, 200), rd.randint(50, 200))
+        after_ridge_mask = overlay_edges(after_ridge_mask, edge_list, random_color)
+        colors.append(random_color)
+    for two_vertex in edge_dictionary.keys():
+        v1, v2 = two_vertex
+        after_ridge_mask[v1] = (255, 255, 255)
+        after_ridge_mask[v2] = (255, 255, 255)
+
+    cv2.namedWindow(window_name)
+    cv2.imshow(window_name, after_ridge_mask)
+    cv2.imwrite(window_name + '.png', after_ridge_mask)
+    if wait_flag:
+        cv2.waitKey()
+        cv2.destroyAllWindows()
+
+
+# -
+#
+def draw_edge(edge, image, color):
+    for point in edge:
+        image[point] = color
+    return image
+
+
+# ---------------------------------------------------------------------------------
+# draw_edges(edges, edge_dictionary, image, color):
+def draw_edges(edges, edge_dictionary, image, color):
+    for edge in edges:
+        edge_list = edge_dictionary[edge]
+        image = overlay_edges(image, edge_list, color)
+    return image
+
+
+# ---------------------------------------------------------------------------------
+# get_nearby_pixels
+def get_nearby_pixels(u, v, w1, w2, edges_dictionary):
+    v_x, v_y = v
+    max_dist = 9
+    max_dist_v = [x for x in range(-max_dist, max_dist + 1)]
+    max_dist_candidates_x = list(map(lambda x: x + v_x, max_dist_v))
+    max_dist_candidates_y = list(map(lambda y: y + v_y, max_dist_v))
+
+    left_column = list(map(lambda e: (v_x - max_dist, e), max_dist_candidates_y))
+    right_column = list(map(lambda e: (v_x + max_dist, e), max_dist_candidates_y))
+    top_column = list(map(lambda e: (e, v_y - max_dist), max_dist_candidates_x))
+    bottom_column = list(map(lambda e: (e, v_y + max_dist), max_dist_candidates_x))
+
+    junction_pixels = dict()
+    if tuple([u, v]) in edges_dictionary.keys():
+        junction_pixels[tuple([u, v])] = edges_dictionary[tuple([u, v])]
+    else:
+        junction_pixels[tuple([u, v])] = edges_dictionary[tuple([v, u])]
+
+    if tuple([v, w1]) in edges_dictionary.keys():
+        junction_pixels[tuple([v, w1])] = edges_dictionary[tuple([v, w1])]
+    else:
+        junction_pixels[tuple([v, w1])] = edges_dictionary[tuple([w1, v])]
+
+    if tuple([v, w2]) in edges_dictionary.keys():
+        junction_pixels[tuple([v, w2])] = edges_dictionary[tuple([v, w2])]
+    else:
+        junction_pixels[tuple([v, w2])] = edges_dictionary[tuple([w2, v])]
+
+    w1_in_radius = [i for i in left_column + right_column + top_column + bottom_column
+                    if i in junction_pixels[(v, w1)]]
+    if len(w1_in_radius) == 0:
+        w1_in_radius = [w1]
+
+    w2_in_radius = [i for i in left_column + right_column + top_column + bottom_column
+                    if i in junction_pixels[(v, w2)]]
+    if len(w2_in_radius) == 0:
+        w2_in_radius = [w2]
+
+    u_in_radius = [i for i in left_column + right_column + top_column + bottom_column
+                   if i in junction_pixels[(u, v)]]
+    if len(u_in_radius) == 0:
+        u_in_radius = [u]
+
+    return u_in_radius[0], w1_in_radius[0], w2_in_radius[0]
+
+
+# ---------------------------------------------------------------------------------
+# calculate_junctions_t_scores
+def calculate_junctions_t_scores(edge_dictionary, ridges_mask):
+    # get rid of edges that have one neighbor only
+    done = False
+    while not done:
+        done = True
+        for edge in edge_dictionary.keys():
+            u, v = edge
+            if u == v:
+                edge_dictionary.pop(edge)
+                done = False
+                break
+
+            junction_v_edges = [edge for edge in edge_dictionary
+                                if (edge[0] == v and edge[1] != u) or (edge[0] != u and edge[1] == v)]
+            if len(junction_v_edges) == 1:
+                new_v = junction_v_edges[0][0] if junction_v_edges[0][0] != v else junction_v_edges[0][1]
+                new_edge = (u, new_v)
+                edge_one = edge_dictionary.pop(edge)
+                edge_two = edge_dictionary.pop(junction_v_edges[0])
+                new_edge_pixels = list(set(edge_one + edge_two).difference(set(edge_one).intersection(edge_two)))
+                # print('edge=', (u, v), 'edges=', junction_v_edges, 'len=', len(junction_v_edges), 'new=', new_edge)
+                edge_dictionary[new_edge] = new_edge_pixels
+                done = False
+                break
+
+            junction_u_edges = [edge for edge in edge_dictionary
+                                if (edge[0] != v and edge[1] == u) or (edge[0] == u and edge[1] != v)]
+            if len(junction_u_edges) == 1:
+                # print('edge=', (v, u), 'edges=', junction_u_edges, 'len=', len(junction_u_edges))
+                new_u = junction_u_edges[0][0] if junction_u_edges[0][0] != u else junction_u_edges[0][1]
+                new_edge = (new_u, v)
+                edge_one = edge_dictionary.pop(edge)
+                edge_two = edge_dictionary.pop(junction_u_edges[0])
+                new_edge_pixels = list(set(edge_one + edge_two).difference(set(edge_one).intersection(edge_two)))
+                edge_dictionary[new_edge] = new_edge_pixels
+                done = False
+                break
+    # calculate for each 3 edges of a junction their T score
+    # return a list
+    t_scores = dict()
+    for edge in edge_dictionary:
+        u, v = edge
+        junction_v_edges = [edge for edge in edge_dictionary
+                            if (edge[0] == v and edge[1] != u) or (edge[0] != u and edge[1] == v)]
+        v_edges = [e[0] if e[1] == v else e[1] for e in junction_v_edges]
+        # print('edge=', edge)
+        # print('junction=', junction_v_edges)
+        for combination in it.combinations(v_edges, 2):
+            w1, w2 = combination
+            # get coordinates in radius 9 - then calculate angle
+            # in_u, in_w1, in_w2 = get_nearby_pixels(u, v, w1, w2, edge_dictionary)
+            in_u = u
+            in_w1 = w1
+            in_w2 = w2
+            # print('in_u=', in_u, 'in_w1=', in_w1,'v=', v, 'in_w2=', in_w2)
+            uv_vw1 = calculate_abs_angle(in_u, v, in_w1)
+            uv_vw2 = calculate_abs_angle(in_u, v, in_w2)
+            w1v_vw2 = calculate_abs_angle(in_w1, v, in_w2)
+            uv_bridge = np.abs(np.pi - w1v_vw2) + np.abs(np.pi / 2.0 - uv_vw1) + np.abs(np.pi / 2.0 - uv_vw2)
+            vw1_bridge = np.abs(np.pi - uv_vw1) + np.abs(np.pi / 2.0 - uv_vw2) + np.abs(np.pi / 2.0 - w1v_vw2)
+            vw2_bridge = np.abs(np.pi - uv_vw2) + np.abs(np.pi / 2.0 - uv_vw1) + np.abs(np.pi / 2.0 - w1v_vw2)
+            t_scores[(u, v, w1, w2)] = [(u, v, uv_bridge), (v, w1, vw1_bridge), (v, w2, vw2_bridge)]
+
+        junction_u_edges = [edge for edge in edge_dictionary
+                            if (edge[0] == u and edge[1] != v) or (edge[0] != v and edge[1] == u)]
+        u_edges = [e[0] if e[1] == u else e[1] for e in junction_u_edges]
+        for combination in it.combinations(u_edges, 2):
+            w1, w2 = combination
+            vu_uw1 = calculate_abs_angle(v, u, w1)
+            vu_uw2 = calculate_abs_angle(v, u, w2)
+            w1u_uw2 = calculate_abs_angle(w1, u, w2)
+            vu_bridge = np.abs(np.pi - w1u_uw2) + np.abs(np.pi / 2.0 - vu_uw1) + np.abs(np.pi / 2.0 - vu_uw2)
+            uw1_bridge = np.abs(np.pi - vu_uw1) + np.abs(np.pi / 2.0 - vu_uw2) + np.abs(np.pi / 2.0 - w1u_uw2)
+            uw2_bridge = np.abs(np.pi - vu_uw2) + np.abs(np.pi / 2.0 - vu_uw1) + np.abs(np.pi / 2.0 - w1u_uw2)
+            t_scores[(v, u, w1, w2)] = [(v, u, vu_bridge), (u, w1, uw1_bridge), (u, w2, uw2_bridge)]
+
+    # in greedy manner: find junction in t_scores where u,v v,w1 v,w2 has minimum T score
+    # mark u,v as Bridge
+    # mark v,w1 and v,w2 as Link
+    # TODO OPTION 1 - 100% greedy - and remove conflicts on the go
+        # remove all u,v from t_scores marked as L
+        # remove all v,w1 and v,w2 from t_scores marked as B
+    # TODO OPTION 2 - each time check for conflicts, and mark as such
+        # add junction to B and L lists
+        # check whether new min junction
+    bridges = []
+    links = []
+
+    while t_scores:
+        done = True
+        # find minimum score for each junction
+        min_t_scores = dict()
+        for key in t_scores.keys():
+            min_score_index = np.argmin(map(lambda e1, e2, score: score, t_scores[key]))
+            min_t_scores[key] = t_scores[key][min_score_index]
+
+        # print(min_t_scores.values())
+        # find junction with minimum score of all junctions
+        values = [value[2] for value in min_t_scores.values()]
+        min_score_index = np.argmin(values)
+        min_score_key = list(min_t_scores.keys())[min_score_index]
+        min_score = min_t_scores[min_score_key]
+        # print('min_score_index=', min_score_index, 'min_score_key=', min_score_key, 'min_score=', min_score)
+        # add to bridges - CHECK FOR CONFLICT
+        new_bridge = (min_score[0], min_score[1])
+        if new_bridge not in edge_dictionary.keys():
+            p1, p2 = new_bridge
+            new_bridge = (p2, p1)
+
+        # print('t_scores[min_score_key]=', t_scores[min_score_key])
+        # add to links - CHECK FOR CONFLICT
+        two_links = [item for item in t_scores[min_score_key] if item is not min_score]
+        # print('two_links=', two_links)
+        new_links = []
+        for link in two_links:
+            e1, e2, _ = link
+            new_link = (e1, e2)
+            if new_link not in edge_dictionary.keys():
+                new_link = (e2, e1)
+            new_links.append(new_link)
+        # check for conflicts before adding them
+        if new_bridge not in links and set(links).isdisjoint(new_links):
+                bridges.append(new_bridge)
+                links.extend(new_links)
+
+        # remove minimum t score junction from t_scores
+        t_scores.pop(min_score_key)
+        # print('B=', bridges, 'L=', links)
+
+    draw_graph_edges(edge_dictionary, ridges_mask, 'before')
+    image = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+    image = draw_edges(bridges, edge_dictionary, image, (255, 0, 0))
+    image = draw_edges(links, edge_dictionary, image, (0, 255, 0))
+    rest = [x for x in edge_dictionary.keys() if x not in set(bridges).union(links)]
+    image = draw_edges(rest, edge_dictionary, image, (0, 0, 255))
+    cv2.namedWindow('after')
+    cv2.imshow('after', image)
+    cv2.imwrite('after_with_white.png', image)
+    cv2.waitKey()
+    cv2.destroyAllWindows()
+    exit()
+    return 0
+
+
+# ---------------------------------------------------------------------------------
 # main execution function
 def execute(input_path):
     # retrieve list of images
@@ -996,42 +1763,62 @@ def execute(input_path):
         time_print('pre-process image...')
         image_preprocessed = pre_process(input_path + image)
         # extract ridges
-        time_print('extract ridges...')
-        ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
+        time_print('extract ridges, junctions...')
+        # ridges_mask, ridges_matrix = ridge_extraction(image_preprocessed)
+        skeleton, edge_dictionary = ridge_extraction(image_preprocessed)
+
+
+
         # mark junction pixels
-        time_print('mark junction pixels...')
-        junction_pixels_mask = mark_junction_pixels(ridges_mask)
+        # time_print('mark junction pixels...')
+        # junction_pixels_mask = mark_junction_pixels(ridges_mask)
         # cv2.imwrite('junction_pixels_mask.png', overlay_images(ridges_mask*255, junction_pixels_mask*255))
         # retrieve vertex pixels
-        time_print('retrieve vertex pixels...')
-        vertexes_dictionary, vertexes_list, labels, vertex_mask = get_vertexes(ridges_matrix, junction_pixels_mask)
+        # time_print('retrieve vertex pixels...')
+        # vertexes_dictionary, vertexes_list, labels, vertex_mask = get_vertexes(ridges_matrix, junction_pixels_mask)
         # save_image_like(ridges_mask, vertexes_list, 'vertex_mask')
         # retrieve edges between two vertexes
         # each edge value is a list of pixels from vertex u to vertex v
         # each edge key is a pair of vertexes (u, v)
-        time_print('retrieve edges between two vertexes...')
-        edge_dictionary = get_edges(ridges_mask, junction_pixels_mask, vertexes_list)
-        time_print('clean graph up...')
-        edge_dictionary = clean_graph(edge_dictionary)
+        # time_print('retrieve edges between two vertexes...')
+        # edge_dictionary = get_edges_between_vertexes(edges, degrees)
+        # edge_dictionary = get_edges(ridges_mask, junction_pixels_mask, vertexes_list)
+        # time_print('clean graph up...')
+        # edge_dictionary = clean_graph(edge_dictionary, ridges_mask)
         # using each two vertexes of an edge, we classify whether an edge is a brige (between two lines),
         # or a link (part of a line). As a result, we receive a list of edges and their classification
         # time_print('classify edges...')
         # edge_scores = classify_edges(edge_dictionary, ridges_mask)
-        # TODO current work . . .
+        # TODO ...
+        # calculate for each junction its B L L, L B L, L L B values using distance from T shape
+        # in greedy manner -
+        #   choose the assignment with minimum value for u,v,w - for all junctions for every combination
+        # TODO step 1: for each u,v v,w1 v,w2 JUNCTION -> calculate 3 scores: L L B, L B L, L L B distance from T
+        t_scores = calculate_junctions_t_scores(edge_dictionary, skeleton)
+        # TODO step 2: visualize result -> for each edge: if all B GREEN, if all L BLUE, mixed RED
+        #
+        # TODO step 3: some options (depending on result in step 2)
+        #       TODO 3.1: for each edge that has no agreement we try to improve by choosing one of the two
+
+        # TODO current work . . . combine edges
         # time_print('calculate vertex T-scores...')
         # calculate_junction_t_distances(vertexes_list, edge_dictionary, ridges_mask)
-        combined_edge_dictionary = combine_edges(vertexes_list, edge_dictionary, ridges_mask)
-        after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
-        for edge_list in combined_edge_dictionary.values():
-            after_ridge_mask = overlay_edges(after_ridge_mask, edge_list)
-        cv2.imwrite(file_name + '_result.png', after_ridge_mask)
+        # combined_edge_dictionary = combine_edges(vertexes_list, edge_dictionary, ridges_mask)
+        # after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
+        # for edge_list in combined_edge_dictionary.values():
+        #    colors = []
+        #    random_color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
+        #    while random_color in colors:
+        #        random_color = (rd.randint(50, 255), rd.randint(50, 255), rd.randint(50, 255))
+        #    after_ridge_mask = overlay_edges(after_ridge_mask, edge_list, random_color)
+        #    colors.append(random_color)
+        # cv2.imwrite(file_name + '_result.png', after_ridge_mask)
         # cv2.namedWindow('before')
         # cv2.namedWindow('after')
         # cv2.imshow('before', before_ridge_mask)
         # cv2.imshow('after', after_ridge_mask)
         # cv2.waitKey()
         # cv2.destroyAllWindows()
-
 
         # classified_image = overlay_classified_edges(image_preprocessed, edge_dictionary, edge_scores)
         # time_print('combine link edges...')
@@ -1056,6 +1843,7 @@ def execute(input_path):
         # cv2.destroyAllWindows()
 
 
-execute("./data/")
-# execute("_005-1.png")
-# execute("0010-1.png")
+if __name__ == "__main__":
+    execute("./data/")
+    # execute("_005-1.png")
+    # execute("0010-1.png")

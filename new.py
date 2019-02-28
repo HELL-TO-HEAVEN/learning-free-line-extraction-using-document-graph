@@ -1664,7 +1664,9 @@ def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
     # add back bridges following this rule: if (u,v) and (w,z) are two edges in combined_graph
     # check if deg(v)=1 and deg(w)=1 and (v,w) \in only_bridges
     # then remove (u,v) remove (w,z) add (u,z) instead
-    done = False
+    # done = False
+    # TODO NO ADD BACK
+    done = True
     # print('only_bridges_total=', len(only_bridges.keys()))
     # print('combined_graph.keys=', combined_graph.keys())
     # print('------------------------------')
@@ -1792,7 +1794,7 @@ def process_image_parallel(image_data, len_images, input_path, output_path):
     overlay_and_save(bridges, links, rest, edge_dictionary, image_view, file_name, 'v_scores')
 
     time_print(idx_str + 'combining graph edges ...')
-    only_bridges, combined_graph = combine_edges(bridges, links, rest, edge_dictionary)
+    only_bridges, combined_graph, use_later = combine_edges(bridges, links, rest, edge_dictionary)
 
     image = 1 - image_view
     image *= 255
@@ -1802,7 +1804,7 @@ def process_image_parallel(image_data, len_images, input_path, output_path):
     draw_graph_edges(combined_graph, res_no_finalization, file_name, wait_flag=False, overlay=True,
                      image_offset_values=image_offset_values, file_name='final_result_no_finalize')
     time_print(idx_str + 'finalizing document graph ...')
-    finalized_combined_graph = finalize_graph(combined_graph, only_bridges, anchors)
+    finalized_combined_graph = finalize_graph(combined_graph, use_later, anchors)
 
     name = draw_graph_edges(finalized_combined_graph, res_finalization, file_name, wait_flag=False, overlay=True,
                             image_offset_values=image_offset_values, file_name='final_result_finalize')
