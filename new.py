@@ -131,7 +131,7 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
     else:
         after_ridge_mask = cv2.cvtColor(np.zeros_like(ridges_mask), cv2.COLOR_GRAY2RGB)
 
-    random_colors = get_spaced_colors(len(edge_dictionary.values()) * 2)
+    # random_colors = get_spaced_colors(len(edge_dictionary.values()) * 2)
     i = 0
     for edge_list in edge_dictionary.values():
         if image_offset_values is not None:
@@ -139,7 +139,7 @@ def draw_graph_edges(edge_dictionary, ridges_mask, window_name, wait_flag=False,
                                 in edge_list]
         else:
             offset_edge_list = edge_list
-        after_ridge_mask = overlay_edges(after_ridge_mask, offset_edge_list, random_colors[i])
+        after_ridge_mask = overlay_edges(after_ridge_mask, offset_edge_list, (57, 255, 20))
         i += 1
     for two_vertex in edge_dictionary.keys():
         v1, v2 = two_vertex
@@ -207,10 +207,10 @@ def split_touching_lines(image, average_width=None):
 
         except RuntimeError:
             # print('could not fit')
-            plt.clf()
+            # plt.clf()
             return [None for l in range(n)], [np.inf for l in range(n)]
         except ValueError:
-            plt.clf()
+            # plt.clf()
             return [None for l in range(n)], [np.inf for l in range(n)]
 
         # append shift for mu_i
@@ -492,26 +492,24 @@ def pre_process(path, file_name, str_idx=''):
         max_cluster_threshold = 0.15
         n_clusters = 11
         data_list = [stat[5] for stat in all_stats]
-        # print('data_list=', data_list)
         data = np.asarray(data_list).reshape(-1, 1)
-        # k_means = KMeans(n_clusters=n_clusters)
-        k_means = GaussianMixture(n_components=n_clusters)
-        k_means.fit(data)
-        y_k_means = k_means.predict(data)
+        gmm = GaussianMixture(n_components=n_clusters)
+        gmm.fit(data)
+        y_k_gmms = gmm.predict(data)
 
-        cluster_size = [len(list(filter(lambda x0: x0 == i, y_k_means))) for i in range(n_clusters)]
+        cluster_size = [len(list(filter(lambda x0: x0 == i, y_k_gmms))) for i in range(n_clusters)]
         total = sum(cluster_size)
 
-        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), data_list), 0)
+        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_gmms), data_list), 0)
                          for i in range(n_clusters)]
         minimum_cluster = np.argmin([c[1]/c[0] if c[0] > 0 else 9999 for c in zip(cluster_size, cluster_total)])
         minimum_cluster_size = cluster_size.count(minimum_cluster)
         # THIS IS A THRESHOLD
         # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
         if minimum_cluster_size / total < max_cluster_threshold:
-                return y_k_means, minimum_cluster
+                return y_k_gmms, minimum_cluster
         else:
-            return y_k_means, None
+            return y_k_gmms, None
 
     # load image as gray-scale,
 
@@ -1824,7 +1822,7 @@ def execute_parallel(input_path, output_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=11)
+    pool = ProcessPoolExecutor(max_workers=4)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path, output_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     i = 0
@@ -1839,6 +1837,6 @@ if __name__ == "__main__":
         # execute_parallel('./data/')
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./data/', './results/')
-        execute('./CB55P_SMALL/', './CB55P_SMALL_RESULTS/')
+        execute_parallel('../data/CSG18_data/', '../data/CSG18_results/')
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./CB55_data/', './CB55_results/')
