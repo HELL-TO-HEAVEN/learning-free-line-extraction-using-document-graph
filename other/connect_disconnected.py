@@ -14,15 +14,19 @@ import itertools as it
 import collections as col
 
 from skan import csr
+
 from os import listdir
 from scipy import optimize
-from scipy import integrate as intg
+
 from skimage import morphology
 from os.path import isfile, join
+from scipy.spatial import distance
+from scipy import integrate as intg
 from matplotlib import pyplot as plt
 from decimal import Decimal, getcontext
 
 from concurrent import futures
+from bresenham import bresenham
 from sklearn.mixture import GaussianMixture
 from concurrent.futures import ProcessPoolExecutor
 
@@ -207,10 +211,10 @@ def split_touching_lines(image, average_width=None):
 
         except RuntimeError:
             # print('could not fit')
-            # plt.clf()
+            plt.clf()
             return [None for l in range(n)], [np.inf for l in range(n)]
         except ValueError:
-            # plt.clf()
+            plt.clf()
             return [None for l in range(n)], [np.inf for l in range(n)]
 
         # append shift for mu_i
@@ -270,6 +274,7 @@ def split_touching_lines(image, average_width=None):
         gmm.fit(heights_to_cluster)
         # y_k_means = k_means.predict(heights_to_cluster)
         y_k_means = gmm.predict(heights_to_cluster)
+        y_k_means_probabilities = gmm.predict_proba(heights_to_cluster)
         # print('y_k_means=', y_k_means)
         # print('y_k_gmms=', y_k_means_gmm)
         # print('=------------------=')
@@ -278,6 +283,7 @@ def split_touching_lines(image, average_width=None):
         for k in range(n_clusters):
             ix = 0
             for y_k in y_k_means:
+                # TODO CHECK GAUSSIAN SOFT CLUSTERING !!
                 if y_k == k:
                     clustered_heights[k].append(heights_to_cluster[ix][0])
                 ix += 1
@@ -322,17 +328,18 @@ def split_touching_lines(image, average_width=None):
         #     return y_k_means, None, None
         if average_width is not None:
             # return y_k_means, max_cluster, cluster_average_sizes[np.argmax(ratios)], average_width
-            return y_k_means, max_cluster, max_average, average_width
+            return y_k_means_probabilities, y_k_means, max_cluster, max_average, average_width
         print('ratios=', third_cluster, second_cluster, first_cluster)
-        if third_cluster * 3 > second_cluster and second_cluster * 3 > first_cluster and third_cluster * 3 < first_cluster:
+        if third_cluster * np.e > second_cluster and second_cluster * np.e > first_cluster and third_cluster * np.e < first_cluster:
             # return y_k_means, max_cluster, cluster_average_sizes[np.argmax(ratios)], None
-            return y_k_means, max_cluster, max_average, None
+            return y_k_means_probabilities, y_k_means, max_cluster, max_average, None
         else:
-            return y_k_means, None, None, None
+
+            return y_k_means_probabilities, y_k_means, None, None, None
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=8, ltype=cv2.CV_32S)
     heights = [component[3] for component in stats[1:]]
-    clustered, max_cluster_index, average_width, old_width = cluster_elements(heights, average_width)
+    clustered_probabilities, clustered, max_cluster_index, average_width, old_width = cluster_elements(heights, average_width)
 
     if max_cluster_index is None:
         # print('No touching lines to be split!')
@@ -369,7 +376,7 @@ def split_touching_lines(image, average_width=None):
         component_image = component_image[y: y + h, x: x + w]
         # cv2.imwrite(str(i) + '_' + str(component) + '.png', component_image)
 
-        if component == max_cluster_index:
+        if component == max_cluster_index:  # and clustered_probabilities[i][max_cluster_index] > 0.75:
             # print('INDEX = ', i, )
             component_image = np.zeros_like(image)
             draw_component_on_image(i, labels, component_image, 255)
@@ -492,24 +499,26 @@ def pre_process(path, file_name, str_idx=''):
         max_cluster_threshold = 0.15
         n_clusters = 11
         data_list = [stat[5] for stat in all_stats]
+        # print('data_list=', data_list)
         data = np.asarray(data_list).reshape(-1, 1)
-        gmm = GaussianMixture(n_components=n_clusters)
-        gmm.fit(data)
-        y_k_gmms = gmm.predict(data)
+        # k_means = KMeans(n_clusters=n_clusters)
+        k_means = GaussianMixture(n_components=n_clusters)
+        k_means.fit(data)
+        y_k_means = k_means.predict(data)
 
-        cluster_size = [len(list(filter(lambda x0: x0 == i, y_k_gmms))) for i in range(n_clusters)]
+        cluster_size = [len(list(filter(lambda x0: x0 == i, y_k_means))) for i in range(n_clusters)]
         total = sum(cluster_size)
 
-        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_gmms), data_list), 0)
+        cluster_total = [ft.reduce(lambda x, y: x + y[1] if y[0] == i else x, zip(list(y_k_means), data_list), 0)
                          for i in range(n_clusters)]
         minimum_cluster = np.argmin([c[1]/c[0] if c[0] > 0 else 9999 for c in zip(cluster_size, cluster_total)])
         minimum_cluster_size = cluster_size.count(minimum_cluster)
         # THIS IS A THRESHOLD
         # print('minimum_cluster_size=', minimum_cluster_size, 'total=', total)
         if minimum_cluster_size / total < max_cluster_threshold:
-                return y_k_gmms, minimum_cluster
+                return y_k_means, minimum_cluster
         else:
-            return y_k_gmms, None
+            return y_k_means, None
 
     # load image as gray-scale,
 
@@ -1602,7 +1611,7 @@ def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
     anchor_edges = [edge for edge in combined_graph.keys() if edge[0] in anchors or edge[1] in anchors]
 
     # flat_anchors = [tuple(val) for sublist in anchor_edges for val in sublist]
-    # remove edges that their angle is not within text_angle threshold
+    # remove edges that their ang is not within text_angle threshold
     # remove_candidates = [edge for edge in combined_graph.keys() if edge[0] not in flat_anchors
     #                     and edge[1] not in flat_anchors and calc_angle(edge) < threshold]
     # print('remove_candidates=', remove_candidates)
@@ -1644,8 +1653,8 @@ def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
                     done = False
                     break
 
-    all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
-    vertexes = list(set(all_vertexes))
+    # all_vertexes = [coord for edge in combined_graph.keys() for coord in edge]
+    # vertexes = list(set(all_vertexes))
     # cv2.namedWindow('edge')
     # for vertex in vertexes:
         # two_links = [link for link in combined_graph.keys() if vertex in link]
@@ -1659,7 +1668,7 @@ def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
         # cv2.waitKey()
     # cv2.destroyAllWindows()
 
-    # add back bridges following this rule: if (u,v) and (w,z) are two edges in combined_graph
+    # add back bridges get_spaced_colorsfollowing this rule: if (u,v) and (w,z) are two edges in combined_graph
     # check if deg(v)=1 and deg(w)=1 and (v,w) \in only_bridges
     # then remove (u,v) remove (w,z) add (u,z) instead
     # done = False
@@ -1689,6 +1698,116 @@ def finalize_graph(combined_graph, only_bridges, anchors, threshold=np.pi / 4):
                 done = False
                 break
 
+    # connect disconnected edges
+    # TODO what we need to do is find for each edge its ang
+    def in_range(e, edge):
+        ue, ve = edge
+        w1, w2 = e
+        if ue == w1 or ue == w2 or ve == w1 or ve == w2:
+            return False
+        my_range = 60  # pixels
+        if np.abs(ve[1] - w1[1]) < np.abs(ve[1] - w2[1]):
+            if np.abs(ve[0] - w1[0]) < my_range:
+                return True
+        else:
+            if np.abs(ve[0] - w2[0]) < my_range:
+                return True
+        if np.abs(ue[1] - w1[1]) < np.abs(ue[1] - w2[1]):
+            if np.abs(ue[0] - w1[0]) < my_range:
+                return True
+        else:
+            if np.abs(ue[0] - w2[0]) < my_range:
+                return True
+        return False
+
+    new_edges = dict()
+    for edge in combined_graph.keys():
+        neighbors = [e for e in combined_graph.keys() if in_range(e, edge)]
+        print('edge=', edge)
+        print('neighbors=', neighbors)
+        print('--')
+        best_for_v = None
+        angle_v = 0
+        distance_v = np.inf
+        best_for_u = None
+        angle_u = 0
+        distance_u = np.inf
+        u, v = edge
+        for neighbor in neighbors:
+            w1, w2 = neighbor
+            all_distances = [distance.euclidean(u, w1), distance.euclidean(u, w2),
+                             distance.euclidean(v, w1), distance.euclidean(v, w2)]
+            # dist_u_w1
+            if np.argmin(all_distances) == 0:
+                ang = calculate_abs_angle(v, u, w1)
+                if np.pi / 2 < ang and all_distances[0] < distance_u:
+                    best_for_u = w1
+                    distance_u = all_distances[0]
+                    angle_u = ang
+            # dist_u_w2
+            elif np.argmin(all_distances) == 1:
+                ang = calculate_abs_angle(v, u, w2)
+                if np.pi / 2 < ang and all_distances[1] < distance_u:
+                    best_for_u = w2
+                    distance_u = all_distances[1]
+                    angle_u = ang
+            # dist_v_w1
+            elif np.argmin(all_distances) == 2:
+                ang = calculate_abs_angle(u, v, w1)
+                if np.pi / 2 < ang and all_distances[2] < distance_v:
+                    best_for_v = w1
+                    distance_v = all_distances[2]
+                    angle_v = ang
+            # dist_v_w2
+            else:
+                ang = calculate_abs_angle(u, v, w2)
+                if np.pi / 2 < ang and all_distances[3] < distance_v:
+                    best_for_v = w2
+                    distance_v = all_distances[3]
+                    angle_v = ang
+
+        image_unmodified = cv2.cvtColor(np.zeros((2000, 2000), np.uint8), cv2.COLOR_GRAY2RGB)
+        for e0 in combined_graph.keys():
+            image_unmodified = overlay_edges(image_unmodified, combined_graph[e0], (0, 0, 255))
+        if best_for_v is not None:
+            pixel_list = list(bresenham(v[0], v[1], best_for_v[0], best_for_v[1]))
+            x_es1 = [e[0] for e in pixel_list]
+            x_es2 = [e[0] for e in combined_graph[edge]]
+            print('angle=', angle_v, 'intersection=', len(set(x_es1).intersection(x_es2)))
+            if len(set(x_es1).intersection(x_es2)) < 10:
+                new_edges[(v, best_for_v)] = pixel_list
+                print('ADDED=', u, (v, best_for_v))
+                cv2.namedWindow('edge')
+                image_unmodified = overlay_edges(image_unmodified, pixel_list, (255, 255, 255))
+                image_unmodified = overlay_edges(image_unmodified, combined_graph[edge], (0, 255, 0))
+                image_unmodified[v] = (255, 255, 255)
+                image_unmodified[best_for_v] = (255, 255, 255)
+                cv2.imshow('edge', image_unmodified)
+                cv2.waitKey()
+                cv2.destroyAllWindows()
+
+        image_unmodified = cv2.cvtColor(np.zeros((2000, 2000), np.uint8), cv2.COLOR_GRAY2RGB)
+        for e0 in combined_graph.keys():
+            image_unmodified = overlay_edges(image_unmodified, combined_graph[e0], (0, 0, 255))
+        if best_for_u is not None:
+            pixel_list = list(bresenham(u[0], u[1], best_for_u[0], best_for_u[1]))
+            x_es1 = [e[0] for e in pixel_list]
+            x_es2 = [e[0] for e in combined_graph[edge]]
+            print('angle=', angle_u, 'intersection=', len(set(x_es1).intersection(x_es2)))
+            if len(set(x_es1).intersection(x_es2)) < 10:
+                new_edges[(u, best_for_u)] = pixel_list
+                print('ADDED=', v, (u, best_for_u))
+                cv2.namedWindow('edge')
+                image_unmodified = overlay_edges(image_unmodified, pixel_list, (255, 255, 255))
+                image_unmodified = overlay_edges(image_unmodified, combined_graph[edge], (0, 255, 0))
+                image_unmodified[u] = (255, 255, 255)
+                image_unmodified[best_for_u] = (255, 255, 255)
+                cv2.imshow('edge', image_unmodified)
+                cv2.waitKey()
+                cv2.destroyAllWindows()
+
+    for edge in new_edges.keys():
+        combined_graph[edge] = new_edges[edge]
     return combined_graph
 
 
@@ -1822,7 +1941,7 @@ def execute_parallel(input_path, output_path):
     # retrieve list of images
     images = [f for f in listdir(input_path) if isfile(join(input_path, f))]
 
-    pool = ProcessPoolExecutor(max_workers=4)
+    pool = ProcessPoolExecutor(max_workers=11)
     wait_for = [pool.submit(process_image_parallel, image, len(images), input_path, output_path) for image in zip(range(1, len(images)), images)]
     # results = [f.result() for f in futures.as_completed(wait_for)]
     i = 0
@@ -1837,6 +1956,7 @@ if __name__ == "__main__":
         # execute_parallel('./data/')
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./data/', './results/')
-        execute_parallel('../data/CSG18_data/', '../data/CSG18_results/')
+        execute('../data/CS863_small_data/', '../data/CS863_small_results/')
         # execute_parallel('./CSG18_data/', './CSG18_results/')
         # execute_parallel('./CB55_data/', './CB55_results/')
+        # execute('../data/data/', '../data/results/')
